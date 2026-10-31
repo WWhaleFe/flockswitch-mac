@@ -1,0 +1,59 @@
+# Builds flockswitch.app from source on a GitHub-hosted Mac and publishes it as a
+# GitHub release when a version tag (v*) is pushed.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+# Read-only by default; only the release job gets write access.
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag must match the version in Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          want="${GITHUB_REF_NAME#v}"
+          have=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [ "$want" != "$have" ]; then echo "tag $GITHUB_REF_NAME but Cargo.toml says $have"; exit 1; fi
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --locked
+      - run: cargo build --release --locked
+      - name: Build flockswitch.app and zip it
+        # ditto keeps the bundle's code signature and executable bits, which a plain
+        # artifact upload would lose.
+        run: |
+          mkdir -p out/flockswitch
+          packaging/macos/make-app.sh target/release/flockswitch out/flockswitch
+          cp LICENSE README.md README.ko.md out/flockswitch/
+          ditto -c -k --keepParent out/flockswitch flockswitch-macos.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flockswitch-macos-arm64
+          path: flockswitch-macos.zip
+
+  release:
+    needs: [macos]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          cp artifacts/flockswitch-macos-arm64/flockswitch-macos.zip "flockswitch-macos-arm64-$version.zip"
+          gh release create "$GITHUB_REF_NAME" flockswitch-*.zip \
+            --repo "$GITHUB_REPOSITORY" --title "flockswitch $GITHUB_REF_NAME" --generate-notes

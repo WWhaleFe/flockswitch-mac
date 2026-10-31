@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>flockswitch</string>
+  <key>CFBundleDisplayName</key><string>flockswitch</string>
+  <key>CFBundleIdentifier</key><string>io.github.wwhalefe.flockswitch</string>
+  <key>CFBundleExecutable</key><string>flockswitch</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>@VERSION@</string>
+  <key>CFBundleVersion</key><string>@VERSION@</string>
+  <key>LSMinimumSystemVersion</key><string>11.0</string>
+  <!-- Menu-bar only: no Dock icon, no app switcher entry. -->
+  <key>LSUIElement</key><true/>
+  <key>NSHumanReadableCopyright</key><string>Copyright (c) 2026 WWhaleFe. MIT License.</string>
+</dict>
+</plist>
