@@ -10,6 +10,10 @@ This repository is the macOS version. The Windows version lives in [flockswitch-
 
 > Not affiliated with Logitech. "Logitech", "MX Master", "Easy-Switch", "Bolt" and "Unifying" are trademarks of Logitech.
 
+## Supported mice
+
+flockswitch was built and tested with the **MX Master 3** and **MX Master 4**. Other Logitech mice with the same buttons (HID++ 2.0 *Change Host* and reprogrammable controls) may work but have **not been tested yet**; testing them is planned. Reports on other mice are welcome.
+
 ## How it works
 
 flockswitch talks HID++ directly to the Logi Bolt / Unifying receiver (or a Bluetooth-connected device):
