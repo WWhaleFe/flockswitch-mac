@@ -35,6 +35,7 @@ struct Ui {
     actions: HashMap<MenuId, Action>,
     shown: (Status, u64),
     uninstall_requested: bool,
+    shortcuts: Option<crate::hotkey::Shortcuts>,
 }
 
 pub fn run(shared: Arc<Shared>) -> Result<()> {
@@ -58,6 +59,7 @@ pub fn run(shared: Arc<Shared>) -> Result<()> {
         actions: HashMap::new(),
         shown: (Status::default(), u64::MAX),
         uninstall_requested: false,
+        shortcuts: None,
     };
     let mut engine = Some(engine);
 
@@ -72,6 +74,16 @@ pub fn run(shared: Arc<Shared>) -> Result<()> {
                     log::error!("cannot create the tray icon: {e:#}");
                     *control_flow = ControlFlow::Exit;
                 }
+            }
+            match crate::hotkey::Shortcuts::new(shared.clone()) {
+                Ok(s) => ui.shortcuts = Some(s),
+                Err(e) => log::warn!("keyboard shortcuts unavailable: {e:#}"),
+            }
+        }
+        // Follow the shortcut settings (and let go while the settings window records one).
+        if let Some(s) = ui.shortcuts.as_mut() {
+            if let Some(failed) = s.sync(&shared.config()) {
+                shared.set_status(|st| st.hotkeys_failed = failed);
             }
         }
 

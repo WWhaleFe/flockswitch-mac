@@ -33,12 +33,13 @@ Get the latest build from [Releases](../../releases).
 The ⇄ menu shows the status, turns switching on or off, checks for updates, opens a report to the developer, and opens **Settings…** — a window with three tabs where every change applies at once (choosing Settings… again brings it back to the front):
 
 - **Switching**: on/off, and per button (wheel mode-shift, gesture, wheel click — several can be on): its channels — each press steps through the channels that are on, like the Easy-Switch button (with two it goes back and forth, with one it always goes there). The gesture button can also switch by holding it and moving the mouse up, down, left or right, each direction with its own channels (the cursor stays still while the button is held).
+- **Shortcuts** (on the same tab, next to the buttons): keyboard shortcuts, one per channel (⌃⌥1 / ⌃⌥2 / ⌃⌥3 until you change them), pressed on any keyboard. They send the group and the master mouse to that channel. Only devices on this Mac can be moved, so a keyboard that does not move along (a wired one, say) can send them away but not bring them back — press the shortcut on the other computer for that. No extra permission is needed.
 - **Devices**: the master mouse, and the devices that move along (Bolt, Unifying and Bluetooth devices can be mixed; devices on another computer are listed too)
 - **General**: the note on Logi Options+, updates (check for a new version, download it), report to the developer, language (Korean or English; the first run follows the system), start at login, uninstall
 
 flockswitch is meant to run alongside Logi Options+. Before setting it up, set each button you turn on to **No action** in Options+, so pressing it does not also run an Options+ action. When flockswitch quits or a button is turned off, the button is put back exactly as it was (including Options+'s own setting).
 
-Command line: `/Applications/flockswitch.app/Contents/MacOS/flockswitch help` (`list`, `switch <N>`, `set <key> <value>`, `run`).
+Command line: `/Applications/flockswitch.app/Contents/MacOS/flockswitch help` (`list`, `switch <N>`, `set <key> <value>`, `run`; e.g. `set hotkeys true`, `set hotkey.2 ctrl+alt+2`).
 
 Settings live in `~/Library/Application Support/flockswitch/`.
 
