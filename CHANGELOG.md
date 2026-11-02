@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.2 — 2026-11-02
+
+- Switching: each button (and each gesture direction) now goes to one channel, “Go to channel” (이동할 채널), instead of stepping through several. Settings are kept per computer, so choose on each Mac where it goes; this Mac's own channel is shown but cannot be chosen. Settings from earlier versions keep working and show where a press goes from this Mac
+
 ## 0.4.1 — 2026-10-31
 
 - Keyboard shortcuts: one per channel (Settings → Switching → Shortcuts, off until turned on; ⌃⌥1 / ⌃⌥2 / ⌃⌥3 until changed). Pressed on any keyboard, they send the group and the master mouse to that channel. Only devices on this Mac can be moved. Registered with macOS, so no extra permission is needed; while you set a new one the shortcuts pause, so pressing it records it instead of switching
