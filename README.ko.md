@@ -22,7 +22,15 @@ flockswitch는 **MX Master 3**와 **MX Master 4**를 바탕으로 만들고 시�
 
 ## 설치 (Apple Silicon)
 
-[Releases](../../releases)에서 내려받습니다.
+[Homebrew](https://brew.sh)를 쓰면:
+
+```sh
+brew install --cask wwhalefe/tap/flockswitch
+```
+
+`flockswitch.app`이 응용 프로그램 폴더에 설치되고, 터미널에서 `flockswitch` 명령도 쓸 수 있습니다. 업데이트는 `brew upgrade flockswitch`입니다. 처음 열 때는 아래 2번처럼 보안 확인이 필요합니다.
+
+또는 [Releases](../../releases)에서 내려받습니다.
 
 1. `flockswitch-macos-arm64-<버전>.zip`을 풀고 `flockswitch.app`을 **응용 프로그램** 폴더로 옮김
 2. 처음 한 번은 보안 확인이 필요합니다:
@@ -59,7 +67,7 @@ flockswitch는 **MX Master 3**와 **MX Master 4**를 바탕으로 만들고 시�
 ## 제거
 
 1. ⇄ 메뉴 → **설정…** → 맨 아래 **flockswitch 제거…** → **제거**. 버튼을 원래대로 돌려놓고, 자동 실행을 해제하고, 설정 폴더를 지운 뒤 종료합니다.
-2. `flockswitch.app`을 지웁니다.
+2. `flockswitch.app`을 지웁니다. Homebrew로 설치했다면 `brew uninstall --cask flockswitch`.
 
 드라이버나 서비스를 설치하지 않고 시스템 설정도 바꾸지 않습니다.
 

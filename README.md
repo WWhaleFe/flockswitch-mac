@@ -26,7 +26,15 @@ Install flockswitch on **every** computer you switch between (flockswitch-window
 
 ## Download
 
-Get the latest build from [Releases](../../releases).
+With [Homebrew](https://brew.sh):
+
+```sh
+brew install --cask wwhalefe/tap/flockswitch
+```
+
+This puts `flockswitch.app` in Applications and the `flockswitch` command on your PATH; `brew upgrade flockswitch` updates it. The first time, open it as in step 2 below.
+
+Or get the latest build from [Releases](../../releases).
 
 1. Unzip `flockswitch-macos-arm64-<version>.zip` and move `flockswitch.app` to Applications (Apple silicon).
 2. The first time, **right-click → Open → Open** (or System Settings → Privacy & Security → *Open Anyway*).
@@ -53,7 +61,7 @@ If something does not work, use ⇄ menu → **Report to the developer…** (or 
 
 1. Open **Settings…** → **Uninstall flockswitch…** → **Uninstall**. This puts the mouse button back to normal, removes start-at-login and deletes the settings folder, then quits.
    (Command line alternative: quit flockswitch, then run `flockswitch uninstall`.)
-2. Delete `flockswitch.app`.
+2. Delete `flockswitch.app` (installed with Homebrew: `brew uninstall --cask flockswitch`).
 
 flockswitch installs no drivers or services and changes no system settings.
 
