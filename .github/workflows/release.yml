@@ -80,7 +80,9 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME#v}"
           cp artifacts/flockswitch-macos-arm64/flockswitch-macos.zip "flockswitch-macos-arm64-$version.zip"
+          # The app checks a downloaded update against this list.
+          sha256sum flockswitch-macos-*.zip > SHA256SUMS.txt
           # --generate-notes adds GitHub's "Full Changelog" link after notes.md.
-          gh release create "$GITHUB_REF_NAME" flockswitch-*.zip \
+          gh release create "$GITHUB_REF_NAME" flockswitch-*.zip SHA256SUMS.txt \
             --repo "$GITHUB_REPOSITORY" --title "flockswitch $GITHUB_REF_NAME" \
             --notes-file notes.md --generate-notes

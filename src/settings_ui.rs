@@ -333,14 +333,14 @@ impl SettingsApp {
 
     /// Downloads the new version into Downloads and shows it in Finder.
     fn download_update(&self, ctx: &egui::Context, release: Release) {
-        let Some((name, url)) = release.asset.clone() else {
+        let Some((name, url, sums)) = release.asset.clone() else {
             update::open_url(&release.page);
             return;
         };
         let (state, ctx) = (self.update.clone(), ctx.clone());
         *state.lock().unwrap() = UpdateUi::Downloading;
         std::thread::spawn(move || {
-            let next = match update::download(&name, &url) {
+            let next = match update::download(&name, &url, &sums) {
                 Ok(path) => {
                     update::reveal(&path);
                     UpdateUi::Downloaded(path)

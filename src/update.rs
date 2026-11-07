@@ -3,7 +3,8 @@
 //! The check reads the latest release from GitHub's public API (no account, nothing
 //! about the user is sent) and compares it with this build. Downloading happens only
 //! when the user asks. HTTP goes through the system's `curl`, which keeps TLS out of the
-//! program.
+//! program, and only over https. A downloaded file must match the SHA256SUMS.txt
+//! published with the release.
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
@@ -51,13 +52,13 @@ pub fn check_into(shared: &crate::shared::Shared) -> UpdateState {
 
 /// Downloads the release file in the background and shows it in Finder.
 pub fn download_into(shared: std::sync::Arc<crate::shared::Shared>, release: Release) {
-    let Some((name, url)) = release.asset.clone() else {
+    let Some((name, url, sums)) = release.asset.clone() else {
         open_url(&release.page);
         return;
     };
     shared.set_status(|s| s.update = UpdateState::Downloading(release.clone()));
     std::thread::spawn(move || {
-        let next = match download(&name, &url) {
+        let next = match download(&name, &url, &sums) {
             Ok(path) => {
                 log::info!("update downloaded: {}", path.display());
                 reveal(&path);
@@ -78,8 +79,9 @@ pub struct Release {
     /// "0.3.2" (without the leading v).
     pub version: String,
     pub page: String,
-    /// The file for this kind of install: (file name, download URL).
-    pub asset: Option<(String, String)>,
+    /// The file for this kind of install and the checksums published with it:
+    /// (file name, download URL, SHA256SUMS.txt URL). None when either is missing.
+    pub asset: Option<(String, String, String)>,
 }
 
 impl Release {
@@ -102,10 +104,10 @@ struct GhAsset {
     browser_download_url: String,
 }
 
-/// The system's curl, quiet and following redirects.
+/// The system's curl, quiet and following redirects, https only (redirects too).
 fn curl() -> Command {
     let mut c = Command::new("curl");
-    c.args(["--silent", "--show-error", "--fail", "--location"]);
+    c.args(["--silent", "--show-error", "--fail", "--location", "--proto", "=https", "--proto-redir", "=https"]);
     c.arg("--user-agent").arg(concat!("flockswitch/", env!("CARGO_PKG_VERSION")));
     c
 }
@@ -122,11 +124,13 @@ pub fn latest() -> Result<Release> {
     let r: GhRelease = serde_json::from_slice(&out.stdout).context("unexpected reply from GitHub")?;
     let version = r.tag_name.trim().trim_start_matches(['v', 'V']).to_string();
     let names: Vec<&str> = r.assets.iter().map(|a| a.name.as_str()).collect();
-    let asset = pick_asset(&names)
-        .and_then(|name| r.assets.iter().find(|a| a.name == name))
-        .map(|a| (a.name.clone(), a.browser_download_url.clone()));
+    let url = |name: &str| r.assets.iter().find(|a| a.name == name).map(|a| a.browser_download_url.clone());
+    let asset = pick_asset(&names).and_then(|name| Some((name.to_string(), url(name)?, url(SUMS)?)));
     Ok(Release { version, page: r.html_url, asset })
 }
+
+/// The checksum list published with every release (`sha256sum` output).
+const SUMS: &str = "SHA256SUMS.txt";
 
 /// The release file with the app (flockswitch-macos-…zip).
 fn pick_asset<'a>(names: &[&'a str]) -> Option<&'a str> {
@@ -149,7 +153,13 @@ pub fn is_newer(a: &str, b: &str) -> bool {
 }
 
 /// Downloads a release file into the Downloads folder (never over an existing file).
-pub fn download(name: &str, url: &str) -> Result<PathBuf> {
+/// A file whose SHA-256 is not the one in the release's checksum list is deleted.
+pub fn download(name: &str, url: &str, sums_url: &str) -> Result<PathBuf> {
+    let out = curl().args(["--max-time", "15", sums_url]).output().context("cannot run curl")?;
+    if !out.status.success() {
+        bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    let want = expected_sha256(&String::from_utf8_lossy(&out.stdout), name).ok_or_else(|| anyhow!("{name} is not in {SUMS}"))?;
     let dir = dirs::download_dir().or_else(|| dirs::home_dir().map(|h| h.join("Downloads"))).ok_or_else(|| anyhow!("no Downloads folder"))?;
     std::fs::create_dir_all(&dir)?;
     let path = unique_path(&dir, name);
@@ -158,7 +168,55 @@ pub fn download(name: &str, url: &str) -> Result<PathBuf> {
         let _ = std::fs::remove_file(&path);
         bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
     }
+    match sha256(&path) {
+        Ok(have) if have == want => {}
+        Ok(have) => {
+            let _ = std::fs::remove_file(&path);
+            bail!("{name} does not match {SUMS} (got {have}, expected {want})");
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&path);
+            return Err(e);
+        }
+    }
+    quarantine(&path);
     Ok(path)
+}
+
+/// The hash listed for `name` in `sha256sum` output ("<hex>  <name>", or "*<name>" in
+/// binary mode), lowercased.
+fn expected_sha256(sums: &str, name: &str) -> Option<String> {
+    sums.lines().find_map(|line| {
+        let (hash, file) = line.trim().split_once(char::is_whitespace)?;
+        let ok = file.trim_start().trim_start_matches('*') == name && hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit());
+        ok.then(|| hash.to_ascii_lowercase())
+    })
+}
+
+/// SHA-256 of a file, lowercase hex, from the system's `shasum`.
+fn sha256(path: &Path) -> Result<String> {
+    let out = Command::new("shasum").args(["-a", "256"]).arg(path).output().context("cannot run shasum")?;
+    if !out.status.success() {
+        bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let hash = text.split_whitespace().next().unwrap_or_default().to_ascii_lowercase();
+    if hash.len() != 64 {
+        bail!("unexpected shasum output: {}", text.trim());
+    }
+    Ok(hash)
+}
+
+/// Marks a download the way a browser does, so Gatekeeper checks the app in it before
+/// it first opens (curl leaves no such mark).
+fn quarantine(path: &Path) {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let value = format!("0081;{now:08x};flockswitch;");
+    match Command::new("xattr").args(["-w", "com.apple.quarantine", &value]).arg(path).status() {
+        Ok(s) if s.success() => {}
+        Ok(s) => log::warn!("cannot mark {} as downloaded: xattr {s}", path.display()),
+        Err(e) => log::warn!("cannot mark {} as downloaded: {e}", path.display()),
+    }
 }
 
 fn unique_path(dir: &Path, name: &str) -> PathBuf {
@@ -259,6 +317,16 @@ mod tests {
             "SHA256SUMS.txt",
         ];
         assert_eq!(pick_asset(&names), Some("flockswitch-macos-arm64-0.3.2.zip"));
+    }
+
+    #[test]
+    fn checksums() {
+        let h = "a".repeat(64);
+        let sums = format!("{}  flockswitch-macos-arm64-0.4.4.zip\n{h} *other.zip\n", "B".repeat(64));
+        assert_eq!(expected_sha256(&sums, "flockswitch-macos-arm64-0.4.4.zip"), Some("b".repeat(64)));
+        assert_eq!(expected_sha256(&sums, "other.zip"), Some(h));
+        assert_eq!(expected_sha256(&sums, "missing.zip"), None);
+        assert_eq!(expected_sha256("abc  short.zip", "short.zip"), None);
     }
 
     #[test]

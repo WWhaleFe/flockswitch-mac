@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.4 — 2026-11-06
+
+- Updates: a downloaded update is checked against the SHA-256 checksums published with the release (SHA256SUMS.txt) and deleted if it does not match. For a release without checksums, the release page opens instead
+- Updates: the check and the download go over https only, redirects included
+- Updates: the downloaded zip is marked as coming from the internet, as a browser download is, so macOS checks the app before it first opens
+
 ## 0.4.3 — 2026-11-02
 
 - “Go to channel”: this Mac's own channel is locked as soon as flockswitch starts. In 0.4.2 it was only found after the first press or after the mouse reconnected, so until then every channel could be chosen
