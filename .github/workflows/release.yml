@@ -69,7 +69,39 @@ jobs:
           for f in CHANGELOG.ko.md CHANGELOG.md; do
             if ! section "$f" | grep -q '[^[:space:]]'; then echo "$f has no notes for $version"; exit 1; fi
           done
-          { printf '## 변경 사항\n\n'; section CHANGELOG.ko.md; printf '\n## Changes\n\n'; section CHANGELOG.md; } > notes.md
+          {
+            printf '## 변경 사항\n\n'
+            section CHANGELOG.ko.md
+            cat <<'EOF'
+
+### Homebrew 설치 (macOS)
+
+```sh
+# 설치
+brew install --cask wwhalefe/tap/flockswitch
+
+# 업데이트 / 제거
+brew upgrade --cask flockswitch
+brew uninstall --cask flockswitch
+```
+
+EOF
+            printf '## Changes\n\n'
+            section CHANGELOG.md
+            cat <<'EOF'
+
+### Install with Homebrew (macOS)
+
+```sh
+# Install
+brew install --cask wwhalefe/tap/flockswitch
+
+# Upgrade / Uninstall
+brew upgrade --cask flockswitch
+brew uninstall --cask flockswitch
+```
+EOF
+          } > notes.md
           cat notes.md
       - uses: actions/download-artifact@v4
         with:
