@@ -40,7 +40,7 @@ pub mod waveform {
 
 /// Keyboards answer slowly when they wake from sleep; 0.6 s was measured to be too short.
 pub const SLOW_TIMEOUT: Duration = Duration::from_millis(2000);
-const FAST_TIMEOUT: Duration = Duration::from_millis(600);
+const FAST_TIMEOUT: Duration = Duration::from_millis(1500);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceKind {
@@ -106,7 +106,7 @@ pub struct HostState {
 
 impl Device {
     pub fn label(&self) -> String {
-        let wpid = self.wpid.map(|w| format!(" [{w:04X}]")).unwrap_or_default();
+        let wpid = self.wpid.filter(|&w| w != 0).map(|w| format!(" [{w:04X}]")).unwrap_or_default();
         format!("{}{}", self.name, wpid)
     }
 
@@ -140,7 +140,7 @@ impl Device {
 
     /// Identity used to remember a device across reconnects and rescans.
     pub fn key(&self) -> String {
-        match self.wpid {
+        match self.wpid.filter(|&w| w != 0) {
             Some(w) => format!("{w:04X}"),
             None => self.name.clone(),
         }
@@ -192,10 +192,14 @@ impl Device {
     /// Reads how a control reports right now; None when the device lacks it (or is away).
     pub fn control_reporting(&self, ep: &mut Endpoint, cid: u16) -> Result<Option<Reporting>> {
         let Some(fi) = self.feature(FEATURE_REPROG_V4) else { return Ok(None) };
-        Ok(match ep.request(self.index, fi, 2, &cid.to_be_bytes(), FAST_TIMEOUT)? {
-            Reply::Ok(r) => Some(Reporting { diverted: r[2] & 0x01 != 0, raw_xy: r[2] & 0x10 != 0 }),
-            _ => None,
-        })
+        for _ in 0..2 {
+            match ep.request(self.index, fi, 2, &cid.to_be_bytes(), FAST_TIMEOUT)? {
+                Reply::Ok(r) => return Ok(Some(Reporting { diverted: r[2] & 0x01 != 0, raw_xy: r[2] & 0x10 != 0 })),
+                Reply::Error => return Ok(None),
+                Reply::Timeout => continue,
+            }
+        }
+        Ok(None)
     }
 
     /// Diverts (or releases) a control so its presses come to us as notifications
@@ -245,10 +249,14 @@ impl Device {
 }
 
 fn feature_index(ep: &mut Endpoint, index: u8, feature: u16, timeout: Duration) -> Result<Option<u8>> {
-    Ok(match ep.request(index, 0x00, 0, &feature.to_be_bytes(), timeout)? {
-        Reply::Ok(r) if r[0] != 0 || feature == FEATURE_ROOT => Some(r[0]),
-        _ => None,
-    })
+    for _ in 0..2 {
+        match ep.request(index, 0x00, 0, &feature.to_be_bytes(), timeout)? {
+            Reply::Ok(r) if r[0] != 0 || feature == FEATURE_ROOT => return Ok(Some(r[0])),
+            Reply::Ok(_) | Reply::Error => return Ok(None),
+            Reply::Timeout => continue,
+        }
+    }
+    Ok(None)
 }
 
 fn read_name(ep: &mut Endpoint, index: u8, fi: u8) -> Result<String> {
@@ -346,7 +354,7 @@ pub fn probe_slot(
     };
     let wpid = match pairing {
         Some(p) => Some(p.wpid),
-        None if ep.kind == EndpointKind::Direct => Some(ep.product_id),
+        None if ep.kind == EndpointKind::Direct && ep.product_id != 0 => Some(ep.product_id),
         None => None,
     };
     Ok(Some(Device {

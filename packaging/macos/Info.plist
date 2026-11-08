@@ -13,6 +13,7 @@
   <key>LSMinimumSystemVersion</key><string>11.0</string>
   <!-- Menu-bar only: no Dock icon, no app switcher entry. -->
   <key>LSUIElement</key><true/>
+  <key>NSBluetoothAlwaysUsageDescription</key><string>flockswitch uses Bluetooth to detect and switch your Logitech mouse and keyboard.</string>
   <key>NSHumanReadableCopyright</key><string>Copyright (c) 2026 WWhaleFe. MIT License.</string>
 </dict>
 </plist>

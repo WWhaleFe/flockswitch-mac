@@ -13,11 +13,12 @@ use std::time::{Duration, Instant};
 pub const LOGITECH_VID: u16 = 0x046d;
 pub const REPORT_SHORT: u8 = 0x10;
 pub const REPORT_LONG: u8 = 0x11;
+const REPORT_VERY_LONG: u8 = 0x12;
 pub const RECEIVER_INDEX: u8 = 0xFF;
 pub const DIRECT_INDEX: u8 = 0xFF;
 
 const SHORT_LEN: usize = 7;
-const LONG_LEN: usize = 20;
+pub const LONG_LEN: usize = 20;
 
 /// USB receivers (devices live in slots 1..=6). Anything else exposing the HID++
 /// collection — e.g. a mouse on a USB cable — is addressed directly at index 0xFF.
@@ -35,6 +36,16 @@ pub enum EndpointKind {
     Direct,
 }
 
+enum Backend {
+    Hid {
+        long: HidDevice,
+        /// Separate handle for short reports. `None` when the OS exposes short and long
+        /// reports on the same handle (macOS) or the endpoint has no short collection.
+        short: Option<HidDevice>,
+    },
+    Ble(crate::ble::BleDevice),
+}
+
 pub struct Endpoint {
     pub kind: EndpointKind,
     pub product: String,
@@ -43,10 +54,7 @@ pub struct Endpoint {
     /// Stable identity of the endpoint across re-enumerations.
     #[allow(dead_code)]
     pub key: String,
-    long: HidDevice,
-    /// Separate handle for short reports. `None` when the OS exposes short and long
-    /// reports on the same handle (macOS) or the endpoint has no short collection.
-    short: Option<HidDevice>,
+    backend: Backend,
     /// The OS lists a separate short collection but it could not be opened (Windows),
     /// so short requests (receiver registers) cannot be sent.
     short_unavailable: bool,
@@ -69,14 +77,28 @@ pub enum Reply {
 
 impl Endpoint {
     /// Writes a report to the right handle.
-    fn write(&self, data: &[u8]) -> Result<()> {
+    fn write(&mut self, data: &[u8]) -> Result<()> {
         anyhow::ensure!(!self.dead, "{} is gone", self.product);
-        let dev = match (data[0], &self.short) {
-            (REPORT_SHORT, Some(short)) => short,
-            _ => &self.long,
-        };
-        dev.write(data).map_err(|e| anyhow!("HID write failed: {e}"))?;
-        Ok(())
+        match &mut self.backend {
+            Backend::Hid { long, short } => {
+                let dev = match (data[0], short.as_ref()) {
+                    (REPORT_SHORT, Some(s)) => s,
+                    _ => long,
+                };
+                if let Err(e) = dev.write(data) {
+                    self.dead = true;
+                    return Err(anyhow!("HID write failed: {e}"));
+                }
+                Ok(())
+            }
+            Backend::Ble(ble) => {
+                if let Err(e) = ble.write(data) {
+                    self.dead = true;
+                    return Err(e);
+                }
+                Ok(())
+            }
+        }
     }
 
     /// Reads one report from any handle, waiting at most `timeout`.
@@ -86,24 +108,52 @@ impl Endpoint {
             std::thread::sleep(timeout);
             return None;
         }
-        let mut buf = [0u8; 64];
-        let ms = timeout.as_millis().max(1) as i32;
-        // Split the wait between the two handles so neither starves.
-        let per = if self.short.is_some() { (ms / 2).max(1) } else { ms };
-        let handles = std::iter::once(&self.long).chain(self.short.as_ref());
-        for dev in handles {
-            match dev.read_timeout(&mut buf, per) {
-                Ok(n) if n > 0 => return Some(buf[..n].to_vec()),
-                Ok(_) => {}
+        let mut report = match &mut self.backend {
+            Backend::Hid { long, short } => {
+                let mut buf = [0u8; 64];
+                let ms = timeout.as_millis().max(1) as i32;
+                // Split the wait between the two handles so neither starves.
+                let per = if short.is_some() { (ms / 2).max(1) } else { ms };
+                let handles = std::iter::once(&*long).chain(short.as_ref());
+                let mut got = None;
+                for dev in handles {
+                    match dev.read_timeout(&mut buf, per) {
+                        Ok(n) if n > 0 => {
+                            got = Some(buf[..n].to_vec());
+                            break;
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            if !self.dead {
+                                log::warn!("{} stopped responding: {e}", self.product);
+                            }
+                            self.dead = true;
+                        }
+                    }
+                }
+                got?
+            }
+            Backend::Ble(ble) => match ble.read(timeout) {
+                Ok(Some(r)) => r,
+                Ok(None) => return None,
                 Err(e) => {
                     if !self.dead {
                         log::warn!("{} stopped responding: {e}", self.product);
                     }
                     self.dead = true;
+                    return None;
                 }
+            },
+        };
+        if self.kind == EndpointKind::Direct && report.len() >= 2 {
+            if report[0] == REPORT_VERY_LONG {
+                report[0] = REPORT_LONG;
+            }
+            if matches!(report[0], REPORT_SHORT | REPORT_LONG) && matches!(report[1], 0x00 | 0x01) {
+                report[1] = DIRECT_INDEX;
             }
         }
-        None
+        Some(report)
     }
 
     /// Returns a queued notification first, then polls the device.
@@ -146,9 +196,15 @@ impl Endpoint {
                 self.backlog.push_back(r);
                 continue;
             }
-            // HID++ 2.0 answers are long reports; anything shorter is not our reply.
-            if r[0] == REPORT_LONG && r.len() >= LONG_LEN && r[2] == feature && r[3] == pkt[3] {
-                return Ok(Reply::Ok(r[4..].to_vec()));
+            if ((r[0] == REPORT_LONG && r.len() >= LONG_LEN) || (r[0] == REPORT_SHORT && r.len() >= SHORT_LEN))
+                && r[2] == feature
+                && r[3] == pkt[3]
+            {
+                let mut payload = r[4..].to_vec();
+                if payload.len() < LONG_LEN - 4 {
+                    payload.resize(LONG_LEN - 4, 0);
+                }
+                return Ok(Reply::Ok(payload));
             }
             // HID++ 2.0 error: [11, idx, FF, feature, fn|swid, code]
             if r[2] == 0xFF && r[3] == feature && r[4] == pkt[3] {
@@ -174,7 +230,7 @@ impl Endpoint {
     }
 
     fn register(&mut self, sub_id: u8, register: u8, params: [u8; 3]) -> Result<Reply> {
-        if self.short_unavailable {
+        if self.short_unavailable || matches!(self.backend, Backend::Ble(_)) {
             return Ok(Reply::Timeout);
         }
         let pkt = [REPORT_SHORT, RECEIVER_INDEX, sub_id, register, params[0], params[1], params[2]];
@@ -219,9 +275,9 @@ fn groups(api: &HidApi) -> BTreeMap<String, Group> {
         let ff00 = if receiver { EndpointKind::Receiver } else { EndpointKind::Direct };
         let (kind, is_long) = match (info.usage_page(), info.usage()) {
             (0xFF00, 0x0001) => (ff00, false),
-            (0xFF00, 0x0002) => (ff00, true),
-            (0xFF43, 0x0202) => (EndpointKind::Direct, true),
-            (0xFF43, 0x0101) => (EndpointKind::Direct, false),
+            (0xFF00, _) => (ff00, true),
+            (0xFF43, 0x0101 | 0x0102) => (EndpointKind::Direct, false),
+            (0xFF43, _) => (EndpointKind::Direct, true),
             _ => continue,
         };
         let path = info.path().to_string_lossy().into_owned();
@@ -232,9 +288,16 @@ fn groups(api: &HidApi) -> BTreeMap<String, Group> {
             g.short = Some(path);
         }
         g.kind = Some(kind);
-        g.product = info.product_string().unwrap_or("").to_string();
+        if g.product.is_empty() {
+            g.product = info.product_string().unwrap_or("").to_string();
+        }
         g.product_id = info.product_id();
         g.usage_page = info.usage_page();
+    }
+    for g in groups.values_mut() {
+        if g.long.is_none() {
+            g.long = g.short.clone();
+        }
     }
     groups.retain(|_, g| g.long.is_some());
     groups
@@ -243,7 +306,9 @@ fn groups(api: &HidApi) -> BTreeMap<String, Group> {
 /// Keys of the endpoints the OS lists right now; cheap, opens nothing. Used to notice
 /// a receiver being plugged in or a Bluetooth device (dis)connecting.
 pub fn endpoint_keys(api: &HidApi) -> Vec<String> {
-    groups(api).into_keys().collect()
+    let mut keys: Vec<String> = groups(api).into_keys().collect();
+    keys.extend(crate::ble::endpoint_keys());
+    keys
 }
 
 /// Opens every Logitech HID++ endpoint on this machine.
@@ -255,7 +320,7 @@ pub fn discover(api: &HidApi) -> Vec<Endpoint> {
         let long = match open(&long_path) {
             Ok(d) => d,
             Err(e) => {
-                log::warn!("cannot open {long_path}: {e}");
+                log::warn!("cannot open {long_path} ({}): {e}", g.product);
                 continue;
             }
         };
@@ -272,13 +337,13 @@ pub fn discover(api: &HidApi) -> Vec<Endpoint> {
             },
             _ => None,
         };
+        let has_separate_short = short.is_some();
         let mut ep = Endpoint {
             kind,
             product: g.product,
             product_id: g.product_id,
             key,
-            long,
-            short,
+            backend: Backend::Hid { long, short },
             backlog: VecDeque::new(),
             short_unavailable,
             dead: false,
@@ -292,9 +357,44 @@ pub fn discover(api: &HidApi) -> Vec<Endpoint> {
                 ep.kind = kind;
             }
         }
-        log::debug!("endpoint {:?} '{}' (separate short handle: {})", kind, ep.product, ep.short.is_some());
+        // Verify that a Bluetooth IOHIDDevice (0xFF43) actually answers HID++ requests;
+        // if macOS does not route HID++ reports through IOHIDDevice for this model, drop
+        // it so CoreBluetooth GATT can open it instead.
+        if ep.kind == EndpointKind::Direct && g.usage_page == 0xFF43 {
+            if !matches!(ep.request(DIRECT_INDEX, 0x00, 0, &[0, 0], Duration::from_millis(800)), Ok(Reply::Ok(_))) {
+                log::debug!("{} (0xFF43 IOHIDDevice) did not answer HID++; trying CoreBluetooth GATT", ep.product);
+                continue;
+            }
+        }
+        log::debug!("endpoint {:?} '{}' (separate short handle: {})", kind, ep.product, has_separate_short);
         out.push(ep);
     }
+
+    for ble_key in crate::ble::endpoint_keys() {
+        let Some(ble) = crate::ble::BleDevice::open(&ble_key) else { continue };
+        let already_open = out.iter().any(|ep| {
+            ep.kind == EndpointKind::Direct
+                && ((ble.product_id != 0 && ep.product_id == ble.product_id)
+                    || (!ble.product.is_empty() && ep.product.eq_ignore_ascii_case(&ble.product)))
+        });
+        if already_open {
+            log::debug!("skipping BLE GATT for '{}' (already open via IOHIDDevice)", ble.product);
+            continue;
+        }
+        log::info!("endpoint Direct '{}' [{:04X}] via CoreBluetooth GATT ({})", ble.product, ble.product_id, ble.key);
+        out.push(Endpoint {
+            kind: EndpointKind::Direct,
+            product: ble.product.clone(),
+            product_id: ble.product_id,
+            key: ble.key.clone(),
+            backend: Backend::Ble(ble),
+            short_unavailable: true,
+            backlog: VecDeque::new(),
+            dead: false,
+            next_swid: 0x8,
+        });
+    }
+
     out
 }
 

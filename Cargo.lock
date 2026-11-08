@@ -1252,10 +1252,11 @@ dependencies = [
 
 [[package]]
 name = "flockswitch"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "auto-launch",
+ "cc",
  "ctrlc",
  "dirs 5.0.1",
  "eframe",

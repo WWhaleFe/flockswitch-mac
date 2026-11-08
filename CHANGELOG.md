@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.1 — 2026-11-08
+
+- Bluetooth & direct device recognition on macOS: added a CoreBluetooth BLE GATT HID++ backend (`00010000-0000-1000-8000-011f2000046d`) and broadened `0xFF43` / `0xFF00` HID++ usage matching so Bolt-generation and Bluetooth-connected Logitech mice and keyboards (including MX Master 4 and MX Mechanical) are recognized reliably even when macOS does not route HID++ through `IOHIDDevice`
+- Receiver & Logi Options+ coexistence: increased HID++ feature/control query timeouts with automatic retry, deduplicated stale multi-slot receiver pairings for the same device, and sped up re-probing of sleeping devices on startup
+
 ## 0.6.0 — 2026-11-08
 
 - Haptics on a mouse with a motor (MX Master 4, HID++ feature 0x19B0): a pulse as the mouse is switched away and one when it comes back here, and short pulses while the cursor waits at a screen edge to switch (Settings → General → **Haptics**; both can be turned off). The strength follows the haptics setting in Logi Options+. A mouse without a motor is simply quiet; `list` shows the waveforms a mouse offers, and `set haptics.switch_waveform`, `haptics.arrive_waveform`, `haptics.edge_waveform` choose them (0-14, 27)

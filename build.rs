@@ -10,7 +10,16 @@ use std::path::Path;
 fn main() {
     println!("cargo:rerun-if-changed=packaging/icon/flockswitch.png");
     println!("cargo:rerun-if-changed=packaging/icon/master.rs");
+    println!("cargo:rerun-if-changed=src/ble_macos.m");
     println!("cargo:rerun-if-changed=build.rs");
+
+    cc::Build::new()
+        .file("src/ble_macos.m")
+        .flag("-fobjc-arc")
+        .compile("flockswitch_ble");
+    println!("cargo:rustc-link-lib=framework=CoreBluetooth");
+    println!("cargo:rustc-link-lib=framework=Foundation");
+
     let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let window_icon = master::scaled(Path::new(MASTER), WINDOW_ICON);
     std::fs::write(out.join("window-icon.rgba"), window_icon).expect("writing window icon");

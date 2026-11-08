@@ -284,20 +284,38 @@ impl Engine {
         }
         let dev = match probed {
             Some(d) => {
+                // Remove stale offline slots of the same device on this receiver.
+                let key = d.key();
+                self.devices.retain(|x| {
+                    !(x.endpoint == endpoint
+                        && x.index != slot
+                        && x.key() == key
+                        && !self.online.contains(&(x.endpoint, x.index)))
+                });
+                let is_mouse = d.kind.map_or(true, |k| k == DeviceKind::Mouse);
                 // A mouse with any of the trigger buttons can be chosen as the master.
-                let can_be_master = d.kind.map_or(true, |k| k == DeviceKind::Mouse)
+                let can_be_master = is_mouse
                     && d.has(FEATURE_REPROG_V4)
                     && d.has(FEATURE_CHANGE_HOST)
                     && !buttons_on(&d, &mut self.endpoints[endpoint], &BUTTONS).is_empty();
                 if can_be_master {
                     self.masters.insert(d.key());
+                } else if !d.has(FEATURE_CHANGE_HOST) || (is_mouse && !d.has(FEATURE_REPROG_V4)) {
+                    // Device answered Root ping while still waking/handshaking; re-probe shortly.
+                    self.pending.entry((endpoint, slot)).or_insert((Instant::now() + SLOT_SETTLE, SLOT_RETRIES));
                 }
                 self.known.insert(d.key(), d.clone());
                 Some(d)
             }
-            None => pairing
-                .and_then(|p| self.known.get(&format!("{:04X}", p.wpid)))
-                .map(|d| d.relocated(endpoint, slot)),
+            None => pairing.and_then(|p| {
+                let key = format!("{:04X}", p.wpid);
+                let already_on_endpoint = self.devices.iter().any(|x| x.endpoint == endpoint && x.key() == key);
+                if already_on_endpoint {
+                    None
+                } else {
+                    self.known.get(&key).map(|d| d.relocated(endpoint, slot))
+                }
+            }),
         };
         if let Some(d) = dev {
             // The slot was re-paired to another device: the old trigger is gone.
@@ -719,7 +737,7 @@ impl Engine {
         Ok(())
     }
 
-    /// Queues paired receiver slots that have no device entry yet, in case a device was
+    /// Queues paired receiver slots that are offline right now, in case a device was
     /// asleep at start-up and has not sent a link notification since.
     fn queue_unlisted(&mut self) -> Result<()> {
         for endpoint in 0..self.endpoints.len() {
@@ -727,8 +745,7 @@ impl Engine {
                 continue;
             }
             for p in device::receiver_pairings(&mut self.endpoints[endpoint])? {
-                let listed = self.devices.iter().any(|d| d.endpoint == endpoint && d.index == p.slot);
-                if !listed {
+                if !self.online.contains(&(endpoint, p.slot)) {
                     self.pending.entry((endpoint, p.slot)).or_insert((Instant::now(), 1));
                 }
             }
@@ -812,7 +829,8 @@ impl Engine {
             if let Err(e) = self.process_pending() {
                 log::warn!("refresh failed: {e:#}");
             }
-            if self.last_check.elapsed() > HEALTH_CHECK {
+            let check_interval = if self.trigger.is_none() { RESCAN_INTERVAL } else { HEALTH_CHECK };
+            if self.last_check.elapsed() > check_interval {
                 self.last_check = Instant::now();
                 if let Err(e) = self.queue_unlisted().and_then(|_| self.ensure_diverted()) {
                     log::warn!("health check failed: {e:#}");

@@ -1,6 +1,7 @@
 //! flockswitch — use a spare Logitech mouse button as an Easy-Switch key that moves the
 //! mouse and its companion keyboard to another computer together.
 
+mod ble;
 mod config;
 mod device;
 mod edge;

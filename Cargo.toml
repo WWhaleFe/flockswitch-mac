@@ -1,6 +1,6 @@
 [package]
 name = "flockswitch"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2021"
 license = "MIT"
 description = "Turn a spare Logitech mouse button into an Easy-Switch key that moves your mouse and keyboard to another computer together"
@@ -32,6 +32,7 @@ opt-level = "s"
 
 
 [build-dependencies]
+cc = "1"
 png = "0.18"
 
 [dev-dependencies]
