@@ -44,6 +44,7 @@ pub fn run(shared: Arc<Shared>) -> Result<()> {
     ctrlc::set_handler(move || s.stop.store(true, std::sync::atomic::Ordering::SeqCst))?;
     let engine = spawn_engine(shared.clone());
     spawn_update_check(shared.clone());
+    crate::edge::spawn(shared.clone());
 
     #[allow(unused_mut)]
     let mut event_loop = EventLoopBuilder::new().build();
