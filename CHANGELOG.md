@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.1 — 2026-11-09
+
+- After a Homebrew upgrade the running app starts the new version and hands over, so there is no need to open it again (this takes effect from the upgrade after 0.7.1)
+
 ## 0.7.0 — 2026-11-09
 
 - Settings window: its size stays within fixed limits (540×680 to start, 480×580 to 680×820), it no longer maximizes, and it keeps its size when you change tabs (a long page scrolls inside). The General tab gains Show log and Reset settings

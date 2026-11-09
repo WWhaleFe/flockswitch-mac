@@ -9,6 +9,7 @@ use crate::shared::{Shared, Status};
 use anyhow::Result;
 use auto_launch::{AutoLaunch, AutoLaunchBuilder, MacOSLaunchMode};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -44,6 +45,7 @@ pub fn run(shared: Arc<Shared>) -> Result<()> {
     ctrlc::set_handler(move || s.stop.store(true, std::sync::atomic::Ordering::SeqCst))?;
     let engine = spawn_engine(shared.clone());
     spawn_update_check(shared.clone());
+    spawn_replacement_watch(shared.clone());
     crate::edge::spawn(shared.clone());
 
     #[allow(unused_mut)]
@@ -361,6 +363,49 @@ fn spawn_update_check(shared: Arc<Shared>) {
     });
 }
 
+/// How often to look whether a new version has replaced this app.
+const REPLACEMENT_CHECK: Duration = Duration::from_secs(5);
+/// Homebrew clears the new app's quarantine flag a moment after moving it into place.
+const REPLACEMENT_SETTLE: Duration = Duration::from_secs(5);
+
+/// The .app folder an executable inside one belongs to.
+fn bundle_of(exe: &Path) -> Option<PathBuf> {
+    let macos = exe.parent()?;
+    let contents = macos.parent()?;
+    let bundle = contents.parent()?;
+    (macos.ends_with("Contents/MacOS") && bundle.extension().is_some_and(|e| e == "app")).then(|| bundle.to_path_buf())
+}
+
+/// The version an Info.plist states.
+fn plist_version(text: &str) -> Option<&str> {
+    let (_, rest) = text.split_once("<key>CFBundleShortVersionString</key>")?;
+    let (_, rest) = rest.split_once("<string>")?;
+    Some(rest.split_once("</string>")?.0.trim())
+}
+
+/// `brew upgrade` swaps the app while this copy keeps running, and cannot start the new
+/// one itself (Homebrew runs a cask's scripts sandboxed, where `open` fails). So the
+/// running copy starts it; the new copy then asks this one to quit and takes over.
+fn spawn_replacement_watch(shared: Arc<Shared>) {
+    let Some(bundle) = std::env::current_exe().ok().and_then(|e| bundle_of(&e)) else { return };
+    std::thread::spawn(move || {
+        while !shared.stopped() {
+            std::thread::sleep(REPLACEMENT_CHECK);
+            // Unreadable while the app is being swapped: look again.
+            let Ok(text) = std::fs::read_to_string(bundle.join("Contents/Info.plist")) else { continue };
+            if plist_version(&text).is_none_or(|v| v == env!("CARGO_PKG_VERSION")) {
+                continue;
+            }
+            log::info!("a new version has replaced this app; starting it");
+            std::thread::sleep(REPLACEMENT_SETTLE);
+            if let Err(e) = std::process::Command::new("/usr/bin/open").args(["-g", "-n"]).arg(&bundle).status() {
+                log::warn!("cannot start the new version: {e}");
+            }
+            return;
+        }
+    });
+}
+
 /// Starts the settings window as a separate process of this same program.
 pub fn open_settings_window() {
     match std::env::current_exe() {
@@ -373,3 +418,22 @@ pub fn open_settings_window() {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_the_app_bundle() {
+        let exe = Path::new("/Applications/flockswitch.app/Contents/MacOS/flockswitch");
+        assert_eq!(bundle_of(exe), Some(PathBuf::from("/Applications/flockswitch.app")));
+        assert_eq!(bundle_of(Path::new("/opt/homebrew/bin/flockswitch")), None);
+        assert_eq!(bundle_of(Path::new("/x/target/release/flockswitch")), None);
+    }
+
+    #[test]
+    fn reads_the_plist_version() {
+        let text = "<key>CFBundleName</key><string>a</string>\n  <key>CFBundleShortVersionString</key><string>0.7.1</string>";
+        assert_eq!(plist_version(text), Some("0.7.1"));
+        assert_eq!(plist_version("<key>CFBundleName</key><string>a</string>"), None);
+    }
+}
