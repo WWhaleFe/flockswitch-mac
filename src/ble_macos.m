@@ -472,24 +472,20 @@ int fs_ble_read(void *handle, uint8_t *out_buf, size_t cap, int32_t timeout_ms) 
             ep.disconnected = true;
             return -1;
         }
+        // Every queued report signals readSem once, so a report and its signal are taken
+        // together; stale signals would make later waits return at once with nothing.
+        if (!wait_ms(ep.readSem, timeout_ms > 0 ? timeout_ms : 0)) {
+            return 0;
+        }
+        if (ep.closed || ep.disconnected || ep.peripheral.state != CBPeripheralStateConnected) {
+            ep.disconnected = true;
+            return -1;
+        }
         NSData *item = nil;
         @synchronized (ep.reports) {
             if (ep.reports.count > 0) {
                 item = ep.reports.firstObject;
                 [ep.reports removeObjectAtIndex:0];
-            }
-        }
-        if (!item && timeout_ms > 0) {
-            wait_ms(ep.readSem, timeout_ms);
-            if (ep.closed || ep.disconnected || ep.peripheral.state != CBPeripheralStateConnected) {
-                ep.disconnected = true;
-                return -1;
-            }
-            @synchronized (ep.reports) {
-                if (ep.reports.count > 0) {
-                    item = ep.reports.firstObject;
-                    [ep.reports removeObjectAtIndex:0];
-                }
             }
         }
         if (!item) {

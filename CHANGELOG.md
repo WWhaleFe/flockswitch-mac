@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.7.0 — 2026-11-09
+
+- Settings window: its size stays within fixed limits (540×680 to start, 480×580 to 680×820), it no longer maximizes, and it keeps its size when you change tabs (a long page scrolls inside). The General tab gains Show log and Reset settings
+- Haptics window: **Haptics Settings…** on the General tab opens a modal window with on/off, strength and the waveforms for switching, arrival and waiting at an edge, closed with Apply (stay open), OK (save and close) or Close (revert). A waveform you apply is played once
+- Screen-edge countdown: while the cursor waits, a yellow effect runs down near it and the switch happens as it vanishes. Choose ring, semicircle, bar, pulse wave, neon laser, particle vortex, cyber scan or liquid, with direction, shrink and preview. Moving away calls it off at once
+- Option to switch at a screen edge **only while Control is held** (`set edge.control true`)
+- Rising haptics: while waiting at an edge the pulses get quicker and stronger, with one more as it switches
+- Find the cursor: a pulse ring, radar or spotlight around the cursor, from a shortcut, when the mouse arrives from another computer, or when it is shaken (Settings → General)
+- Follow-ups to the Bluetooth and receiver work of 0.6.1: a device without switching is no longer read again forever, a Bluetooth device that answers slowly stays listed, Logitech devices that do not speak HID++ are left alone, and waiting for Bluetooth reports no longer spins
+- Homebrew upgrades: a copy started at login is now quit too, the new version is started afterwards, and "Open Anyway" is no longer needed each time. To upgrade: `brew update && brew upgrade --cask flockswitch`
+
 ## 0.6.1 — 2026-11-08
 
 - Bluetooth & direct device recognition on macOS: added a CoreBluetooth BLE GATT HID++ backend (`00010000-0000-1000-8000-011f2000046d`) and broadened `0xFF43` / `0xFF00` HID++ usage matching so Bolt-generation and Bluetooth-connected Logitech mice and keyboards (including MX Master 4 and MX Mechanical) are recognized reliably even when macOS does not route HID++ through `IOHIDDevice`

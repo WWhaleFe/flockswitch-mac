@@ -69,6 +69,7 @@ pub fn run(shared: Arc<Shared>) -> Result<()> {
 
         // The tray icon must be created once the event loop is running (macOS).
         if let Event::NewEvents(StartCause::Init) = event {
+            crate::overlay::set_ready();
             match ui.create_tray() {
                 Ok(()) => {}
                 Err(e) => {

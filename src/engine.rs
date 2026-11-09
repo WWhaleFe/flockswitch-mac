@@ -254,14 +254,20 @@ impl Engine {
             self.gesture = None;
         }
         let intensity_changed = next.haptics.intensity != self.cfg.haptics.intensity;
+        // A waveform just chosen, played once so the hand can judge it.
+        let waveforms = |h: &crate::config::Haptics| [h.switch_waveform, h.arrive_waveform, h.edge_waveform];
+        let new_waveform =
+            waveforms(&next.haptics).into_iter().zip(waveforms(&self.cfg.haptics)).find(|(new, old)| new != old).map(|(new, _)| new);
         self.cfg = next;
         log::info!("settings changed ({})", self.mode_text());
         if intensity_changed {
             self.apply_haptic_intensity();
+        }
+        if let Some(waveform) = new_waveform {
+            self.buzz(waveform);
+        } else if intensity_changed && self.cfg.haptics.intensity != 0 {
             // A pulse at the new strength, so the hand can judge it.
-            if self.cfg.haptics.intensity != 0 {
-                self.buzz(self.cfg.haptics.switch_waveform);
-            }
+            self.buzz(self.cfg.haptics.switch_waveform);
         }
         if self.cfg.enabled {
             self.ensure_diverted()?;
@@ -720,6 +726,15 @@ impl Engine {
             let pairings = device::receiver_pairings(&mut self.endpoints[endpoint])?;
             let pairing = pairings.iter().find(|p| p.slot == slot);
             let online = self.load_slot(endpoint, slot, pairing)?;
+            // A device still waking asks for another look; that uses up this slot's
+            // attempts, so one that simply lacks the features is not read forever.
+            if left > 1 {
+                if let Some(again) = self.pending.get_mut(&(endpoint, slot)) {
+                    again.1 = left - 1;
+                }
+            } else {
+                self.pending.remove(&(endpoint, slot));
+            }
             self.publish();
             if online {
                 if self.trigger.is_none() || self.is_trigger(endpoint, slot) {

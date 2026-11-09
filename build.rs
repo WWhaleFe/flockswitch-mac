@@ -11,14 +11,20 @@ fn main() {
     println!("cargo:rerun-if-changed=packaging/icon/flockswitch.png");
     println!("cargo:rerun-if-changed=packaging/icon/master.rs");
     println!("cargo:rerun-if-changed=src/ble_macos.m");
+    println!("cargo:rerun-if-changed=src/overlay_macos.m");
     println!("cargo:rerun-if-changed=build.rs");
 
     cc::Build::new()
         .file("src/ble_macos.m")
+        .file("src/overlay_macos.m")
         .flag("-fobjc-arc")
-        .compile("flockswitch_ble");
+        // Info.plist promises macOS 11; left alone, this follows the machine building it.
+        .flag("-mmacosx-version-min=11.0")
+        .compile("flockswitch_native");
     println!("cargo:rustc-link-lib=framework=CoreBluetooth");
     println!("cargo:rustc-link-lib=framework=Foundation");
+    println!("cargo:rustc-link-lib=framework=AppKit");
+    println!("cargo:rustc-link-lib=framework=QuartzCore");
 
     let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let window_icon = master::scaled(Path::new(MASTER), WINDOW_ICON);

@@ -36,6 +36,9 @@ pub mod waveform {
     pub const JINGLE: u8 = 13;
     pub const RINGING: u8 = 14;
     pub const WHISPER_COLLISION: u8 = 27;
+
+    /// Every waveform above, in the order the settings window lists them.
+    pub const ALL: [u8; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 27];
 }
 
 /// Keyboards answer slowly when they wake from sleep; 0.6 s was measured to be too short.

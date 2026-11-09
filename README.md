@@ -32,7 +32,7 @@ With [Homebrew](https://brew.sh):
 brew install --cask wwhalefe/tap/flockswitch
 ```
 
-This puts `flockswitch.app` in Applications and the `flockswitch` command on your PATH; `brew upgrade flockswitch` updates it. The first time, open it as in step 2 below.
+This puts `flockswitch.app` in Applications and the `flockswitch` command on your PATH; `brew update && brew upgrade --cask flockswitch` updates it (on a Mac `--cask` is required). It starts by itself after installing or upgrading, with no security prompt.
 
 Or get the latest build from [Releases](../../releases).
 
@@ -46,9 +46,9 @@ The ⇄ menu shows the status, turns switching on or off, checks for updates, op
 
 - **Switching**: on/off, and per button (wheel mode-shift, gesture, wheel click — several can be on): the channel it goes to — one channel, chosen on each computer since settings are kept per computer; this Mac's own channel is shown but cannot be chosen. The gesture button can also switch by holding it and moving the mouse up, down, left or right, each direction with its own channel (the cursor stays still while the button is held).
 - **Shortcuts** (on the same tab, next to the buttons): keyboard shortcuts, one per channel (⌃⌥1 / ⌃⌥2 / ⌃⌥3 until you change them), pressed on any keyboard. They send the group and the master mouse to that channel. Only devices on this Mac can be moved, so a keyboard that does not move along (a wired one, say) can send them away but not bring them back — press the shortcut on the other computer for that. No extra permission is needed.
-- **Edges** (same tab): rest the cursor against an outer edge of the screen for a moment (0.3 to 2 s, your choice) and the group and the master mouse go to the channel set for that side. No network: each computer watches its own screen, so turn it on on every computer and give each side the channel of the computer that stands there. When the mouse comes back, the cursor appears at the edge it left by. The corners do not count, and with several displays an edge that continues onto another display does not switch.
+- **Edges** (same tab): rest the cursor against an outer edge of the screen for a moment (0.3 to 2 s, your choice) and the group and the master mouse go to the channel set for that side. No network: each computer watches its own screen, so turn it on on every computer and give each side the channel of the computer that stands there. While it waits a yellow effect runs down near the cursor (ring, semicircle, bar, pulse, laser, vortex, scan or liquid), and you can require Control to be held. When the mouse comes back, the cursor appears at the edge it left by. The corners do not count, and with several displays an edge that continues onto another display does not switch.
 - **Devices**: the master mouse, and the devices that move along (Bolt, Unifying and Bluetooth devices can be mixed; devices on another computer are listed too)
-- **General**: haptics on an MX Master 4 (a pulse when switching and short pulses while the cursor waits at a screen edge), the note on Logi Options+, updates (check for a new version, download it), report to the developer, language (Korean or English; the first run follows the system), start at login, uninstall
+- **General**: haptics on an MX Master 4 (a summary and the **Haptics Settings…** window: on/off, strength, waveforms, pulses that rise towards the switch), find the cursor (a pulse ring, radar or spotlight from a shortcut, on arrival from another computer, or by shaking the mouse), the note on Logi Options+, updates (check for a new version, download it), report to the developer, language (Korean or English; the first run follows the system), start at login, uninstall
 
 flockswitch is meant to run alongside Logi Options+. Before setting it up, set each button you turn on to **No action** in Options+, so pressing it does not also run an Options+ action. When flockswitch quits or a button is turned off, the button is put back exactly as it was (including Options+'s own setting).
 

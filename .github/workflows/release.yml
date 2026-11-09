@@ -72,10 +72,10 @@ jobs:
           {
             printf '## 변경 사항\n\n'
             section CHANGELOG.ko.md
-            printf '\n### Homebrew 설치 (macOS)\n\n```sh\n# 설치\nbrew install --cask wwhalefe/tap/flockswitch\n\n# 업데이트 / 제거\nbrew upgrade --cask flockswitch\nbrew uninstall --cask flockswitch\n```\n\n'
+            printf '\n### Homebrew 설치 (macOS)\n\n```sh\n# 설치\nbrew install --cask wwhalefe/tap/flockswitch\n\n# 업데이트 / 제거\nbrew update && brew upgrade --cask flockswitch\nbrew uninstall --cask flockswitch\n```\n\n'
             printf '## Changes\n\n'
             section CHANGELOG.md
-            printf '\n### Install with Homebrew (macOS)\n\n```sh\n# Install\nbrew install --cask wwhalefe/tap/flockswitch\n\n# Upgrade / Uninstall\nbrew upgrade --cask flockswitch\nbrew uninstall --cask flockswitch\n```\n'
+            printf '\n### Install with Homebrew (macOS)\n\n```sh\n# Install\nbrew install --cask wwhalefe/tap/flockswitch\n\n# Upgrade / Uninstall\nbrew update && brew upgrade --cask flockswitch\nbrew uninstall --cask flockswitch\n```\n'
           } > notes.md
           cat notes.md
       - uses: actions/download-artifact@v4

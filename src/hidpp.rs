@@ -275,7 +275,8 @@ fn groups(api: &HidApi) -> BTreeMap<String, Group> {
         let ff00 = if receiver { EndpointKind::Receiver } else { EndpointKind::Direct };
         let (kind, is_long) = match (info.usage_page(), info.usage()) {
             (0xFF00, 0x0001) => (ff00, false),
-            (0xFF00, _) => (ff00, true),
+            // 0xFF00 is a generic vendor page: other usages there are not HID++.
+            (0xFF00, 0x0002) => (ff00, true),
             (0xFF43, 0x0101 | 0x0102) => (EndpointKind::Direct, false),
             (0xFF43, _) => (EndpointKind::Direct, true),
             _ => continue,
@@ -294,7 +295,7 @@ fn groups(api: &HidApi) -> BTreeMap<String, Group> {
         g.product_id = info.product_id();
         g.usage_page = info.usage_page();
     }
-    for g in groups.values_mut() {
+    for g in groups.values_mut().filter(|g| g.usage_page == 0xFF43) {
         if g.long.is_none() {
             g.long = g.short.clone();
         }
@@ -314,6 +315,8 @@ pub fn endpoint_keys(api: &HidApi) -> Vec<String> {
 /// Opens every Logitech HID++ endpoint on this machine.
 pub fn discover(api: &HidApi) -> Vec<Endpoint> {
     let mut out = Vec::new();
+    // Bluetooth handles that did not answer yet; kept unless CoreBluetooth reaches the device.
+    let mut unanswered: Vec<Endpoint> = Vec::new();
     for (key, g) in groups(api) {
         let (Some(long_path), Some(kind)) = (g.long, g.kind) else { continue };
         let open = |p: &str| api.open_path(&std::ffi::CString::new(p).unwrap());
@@ -358,11 +361,13 @@ pub fn discover(api: &HidApi) -> Vec<Endpoint> {
             }
         }
         // Verify that a Bluetooth IOHIDDevice (0xFF43) actually answers HID++ requests;
-        // if macOS does not route HID++ reports through IOHIDDevice for this model, drop
-        // it so CoreBluetooth GATT can open it instead.
+        // if macOS does not route HID++ reports through IOHIDDevice for this model,
+        // CoreBluetooth GATT opens it instead. A slow answer is not proof of that, and
+        // a device dropped here would not be looked at again until the OS list changes.
         if ep.kind == EndpointKind::Direct && g.usage_page == 0xFF43 {
             if !matches!(ep.request(DIRECT_INDEX, 0x00, 0, &[0, 0], Duration::from_millis(800)), Ok(Reply::Ok(_))) {
                 log::debug!("{} (0xFF43 IOHIDDevice) did not answer HID++; trying CoreBluetooth GATT", ep.product);
+                unanswered.push(ep);
                 continue;
             }
         }
@@ -393,6 +398,12 @@ pub fn discover(api: &HidApi) -> Vec<Endpoint> {
             dead: false,
             next_swid: 0x8,
         });
+    }
+
+    for ep in unanswered {
+        if !out.iter().any(|o| o.kind == EndpointKind::Direct && o.product.eq_ignore_ascii_case(&ep.product)) {
+            out.push(ep);
+        }
     }
 
     out
