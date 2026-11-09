@@ -12,6 +12,7 @@
 #import <QuartzCore/QuartzCore.h>
 #include <math.h>
 #include <stdbool.h>
+#include <string.h>
 
 enum { EDGE_LEFT, EDGE_RIGHT, EDGE_TOP, EDGE_BOTTOM };
 enum { DIR_CLOCKWISE, DIR_COUNTERCLOCKWISE, DIR_BOTH };
@@ -24,17 +25,19 @@ static const double kLocateFade = 0.35;
 
 // ---- Drawing helpers -------------------------------------------------------------
 
-/// The accent of every effect: #FFCC00.
-static void stroke_yellow(CGContextRef c, double alpha) {
-    CGContextSetRGBStrokeColor(c, 1.0, 0.8, 0.0, alpha);
+/// The colour of the effect being drawn, as chosen in the settings.
+static CGFloat gAccent[3] = { 1.0, 0.8, 0.0 };
+
+static void stroke_accent(CGContextRef c, double alpha) {
+    CGContextSetRGBStrokeColor(c, gAccent[0], gAccent[1], gAccent[2], alpha);
 }
 
-static void fill_yellow(CGContextRef c, double alpha) {
-    CGContextSetRGBFillColor(c, 1.0, 0.8, 0.0, alpha);
+static void fill_accent(CGContextRef c, double alpha) {
+    CGContextSetRGBFillColor(c, gAccent[0], gAccent[1], gAccent[2], alpha);
 }
 
 static void glow(CGContextRef c, double blur, double alpha) {
-    CGColorRef color = CGColorCreateSRGB(1.0, 0.8, 0.0, alpha);
+    CGColorRef color = CGColorCreateSRGB(gAccent[0], gAccent[1], gAccent[2], alpha);
     CGContextSetShadowWithColor(c, CGSizeZero, blur, color);
     CGColorRelease(color);
 }
@@ -99,16 +102,16 @@ static void edge_ring(const EdgeFrame *f) {
     CGContextSetLineWidth(c, 5);
     if (f->shrink) {
         glow(c, 12, 0.9);
-        stroke_yellow(c, 1);
+        stroke_accent(c, 1);
         circle_path(c, o, radius * left);
         CGContextStrokePath(c);
         return;
     }
-    stroke_yellow(c, 0.18);
+    stroke_accent(c, 0.18);
     circle_path(c, o, radius);
     CGContextStrokePath(c);
     glow(c, 12, 0.9);
-    stroke_yellow(c, 1);
+    stroke_accent(c, 1);
     const double top = M_PI_2;
     switch (f->direction) {
         case DIR_COUNTERCLOCKWISE:
@@ -133,7 +136,7 @@ static void edge_semicircle(const EdgeFrame *f) {
     CGContextSetLineCap(c, kCGLineCapRound);
     if (f->shrink) {
         glow(c, 14, 0.8);
-        fill_yellow(c, 0.85);
+        fill_accent(c, 0.85);
         CGContextMoveToPoint(c, o.x, o.y);
         CGContextAddArc(c, o.x, o.y, radius * left, mid - M_PI_2, mid + M_PI_2, 0);
         CGContextClosePath(c);
@@ -141,7 +144,7 @@ static void edge_semicircle(const EdgeFrame *f) {
         return;
     }
     CGContextSetLineWidth(c, 6);
-    stroke_yellow(c, 0.18);
+    stroke_accent(c, 0.18);
     CGContextAddArc(c, o.x, o.y, radius, mid - M_PI_2, mid + M_PI_2, 0);
     CGContextStrokePath(c);
 
@@ -161,13 +164,13 @@ static void edge_semicircle(const EdgeFrame *f) {
             to = mid - M_PI_2;
             clockwise = 1;
     }
-    fill_yellow(c, 0.16);
+    fill_accent(c, 0.16);
     CGContextMoveToPoint(c, o.x, o.y);
     CGContextAddArc(c, o.x, o.y, radius, from, to, clockwise);
     CGContextClosePath(c);
     CGContextFillPath(c);
     glow(c, 12, 0.9);
-    stroke_yellow(c, 1);
+    stroke_accent(c, 1);
     CGContextAddArc(c, o.x, o.y, radius, from, to, clockwise);
     CGContextStrokePath(c);
 }
@@ -189,14 +192,14 @@ static void edge_bar(const EdgeFrame *f) {
     }
     CGContextSetLineCap(c, kCGLineCapRound);
     CGContextSetLineWidth(c, 6);
-    stroke_yellow(c, 0.16);
+    stroke_accent(c, 0.16);
     CGPoint a = from_anchor(f, -length / 2, inset), b = from_anchor(f, length / 2, inset);
     CGContextMoveToPoint(c, a.x, a.y);
     CGContextAddLineToPoint(c, b.x, b.y);
     CGContextStrokePath(c);
     if (high - low <= 0.5) return;
     glow(c, 14, 1);
-    stroke_yellow(c, 1);
+    stroke_accent(c, 1);
     a = from_anchor(f, low, inset);
     b = from_anchor(f, high, inset);
     CGContextMoveToPoint(c, a.x, a.y);
@@ -213,14 +216,14 @@ static void edge_pulse(const EdgeFrame *f) {
     CGContextSetLineWidth(c, 2.5);
     for (int i = 0; i < 3; i++) {
         double phase = fmod(f->t * 1.4 + i / 3.0, 1.0);
-        stroke_yellow(c, (1 - phase) * 0.9 * (1 - contract * 0.5));
+        stroke_accent(c, (1 - phase) * 0.9 * (1 - contract * 0.5));
         circle_path(c, f->anchor, phase * reach);
         CGContextStrokePath(c);
     }
     double core = (8 + 3 * sin(f->t * 10)) * (1 - contract) + 16 * sin(M_PI * contract) * (1 - contract);
     if (core <= 0.05) return;
     glow(c, 16, 1);
-    fill_yellow(c, 1);
+    fill_accent(c, 1);
     circle_path(c, f->anchor, core);
     CGContextFillPath(c);
 }
@@ -244,7 +247,7 @@ static void edge_laser(const EdgeFrame *f) {
             double a0 = head + tail * k / steps, a1 = head + tail * (k + 1) / steps;
             double jitter = (noise(frame + k * 7 + side) - 0.5) * 2.4;
             CGPoint p0 = from_anchor(f, a0, inset + jitter), p1 = from_anchor(f, a1, inset + jitter);
-            stroke_yellow(c, pow(1 - (double)k / steps, 1.5) * fade);
+            stroke_accent(c, pow(1 - (double)k / steps, 1.5) * fade);
             CGContextSetLineWidth(c, 3.5);
             CGContextMoveToPoint(c, p0.x, p0.y);
             CGContextAddLineToPoint(c, p1.x, p1.y);
@@ -257,7 +260,7 @@ static void edge_laser(const EdgeFrame *f) {
     glow(c, 6, 1);
     CGContextSetLineWidth(c, 1.6);
     double mid = atan2(f->inward.dy, f->inward.dx);
-    stroke_yellow(c, 1 - burst);
+    stroke_accent(c, 1 - burst);
     for (int i = 0; i < 18; i++) {
         double angle = mid + (noise(i * 3) - 0.5) * M_PI * 0.95;
         double r0 = 8 + 70 * burst * noise(i * 5), r1 = r0 + 12 + 26 * noise(i * 7);
@@ -279,12 +282,12 @@ static void edge_vortex(const EdgeFrame *f) {
         double angle = noise(i) * 2 * M_PI + f->t * speed;
         double radius = (24 + 58 * noise(i + 200)) * (1 - closing);
         double size = (1.2 + 2.4 * noise(i + 300)) * (1 - f->p * 0.5);
-        fill_yellow(c, (0.35 + 0.65 * noise(i + 400)) * fade);
+        fill_accent(c, (0.35 + 0.65 * noise(i + 400)) * fade);
         circle_path(c, CGPointMake(o.x + cos(angle) * radius, o.y + sin(angle) * radius), size);
         CGContextFillPath(c);
     }
     glow(c, 18, 1);
-    fill_yellow(c, fade);
+    fill_accent(c, fade);
     circle_path(c, o, (3 + 13 * f->p) * fade);
     CGContextFillPath(c);
 }
@@ -301,7 +304,7 @@ static void edge_scan(const EdgeFrame *f) {
 
     glow(c, 8, 0.8);
     CGContextSetLineWidth(c, 2);
-    stroke_yellow(c, alpha * 0.9);
+    stroke_accent(c, alpha * 0.9);
     for (int i = 0; i < 36; i++) {
         double angle = i * M_PI / 18 + f->t * 0.8;
         double inner = radius - (i % 3 == 0 ? 9 : 4);
@@ -314,7 +317,7 @@ static void edge_scan(const EdgeFrame *f) {
     CGContextSetLineWidth(c, 2.4);
     for (int k = 0; k < 12; k++) {
         double angle = sweep - k * 0.09;
-        stroke_yellow(c, alpha * pow(1 - k / 12.0, 2));
+        stroke_accent(c, alpha * pow(1 - k / 12.0, 2));
         CGContextMoveToPoint(c, o.x, o.y);
         CGContextAddLineToPoint(c, o.x + cos(angle) * (radius - 3), o.y + sin(angle) * (radius - 3));
         CGContextStrokePath(c);
@@ -324,7 +327,7 @@ static void edge_scan(const EdgeFrame *f) {
     if (unrest > 0.25) {
         int frame = (int)floor(f->t * 30);
         no_glow(c);
-        fill_yellow(c, alpha * 0.8);
+        fill_accent(c, alpha * 0.8);
         for (int i = 0; i < 5; i++) {
             double y = o.y + (noise(frame + i * 11) - 0.5) * radius * 2;
             double x = o.x - radius + noise(frame + i * 13) * radius * 0.6 + (noise(frame + i * 17) - 0.5) * 22 * unrest;
@@ -341,7 +344,7 @@ static void edge_liquid(const EdgeFrame *f) {
     double level = radius * (1 - f->p);
 
     CGContextSetLineWidth(c, 2.5);
-    stroke_yellow(c, 0.45 * (1 - smooth(0.9, 1.0, f->p)));
+    stroke_accent(c, 0.45 * (1 - smooth(0.9, 1.0, f->p)));
     CGContextAddArc(c, o.x, o.y, radius, mid - M_PI_2, mid + M_PI_2, 0);
     CGContextClosePath(c);
     CGContextStrokePath(c);
@@ -362,7 +365,7 @@ static void edge_liquid(const EdgeFrame *f) {
     CGPoint end = from_anchor(f, radius, 0);
     CGContextAddLineToPoint(c, end.x, end.y);
     CGContextClosePath(c);
-    fill_yellow(c, 0.9);
+    fill_accent(c, 0.9);
     CGContextFillPath(c);
     CGContextRestoreGState(c);
 }
@@ -394,7 +397,7 @@ static void locate_ring(const LocateFrame *f) {
         double phase = clamp01((f->t - i * 0.16) / 0.85);
         if (phase <= 0) continue;
         double eased = 1 - pow(1 - phase, 3);
-        stroke_yellow(c, (1 - phase * 0.75) * f->fade);
+        stroke_accent(c, (1 - phase * 0.75) * f->fade);
         circle_path(c, f->center, 170 * (1 - eased) + 26);
         CGContextStrokePath(c);
     }
@@ -406,7 +409,7 @@ static void locate_radar(const LocateFrame *f) {
     glow(c, 8, 0.8 * f->fade);
     CGContextSetLineWidth(c, 1.6);
     for (int i = 1; i <= 3; i++) {
-        stroke_yellow(c, 0.45 * f->fade);
+        stroke_accent(c, 0.45 * f->fade);
         circle_path(c, f->center, reach * i / 3);
         CGContextStrokePath(c);
     }
@@ -414,13 +417,13 @@ static void locate_radar(const LocateFrame *f) {
     CGContextSetLineWidth(c, 2.6);
     for (int k = 0; k < 26; k++) {
         double angle = sweep + k * 0.05;
-        stroke_yellow(c, pow(1 - k / 26.0, 2) * f->fade);
+        stroke_accent(c, pow(1 - k / 26.0, 2) * f->fade);
         CGContextMoveToPoint(c, f->center.x, f->center.y);
         CGContextAddLineToPoint(c, f->center.x + cos(angle) * reach, f->center.y + sin(angle) * reach);
         CGContextStrokePath(c);
     }
     double ping = fmod(f->t * 1.6, 1.0);
-    stroke_yellow(c, (1 - ping) * f->fade);
+    stroke_accent(c, (1 - ping) * f->fade);
     CGContextSetLineWidth(c, 3.5);
     circle_path(c, f->center, ping * reach);
     CGContextStrokePath(c);
@@ -437,7 +440,7 @@ static void locate_spotlight(const LocateFrame *f) {
     CGContextEOFillPath(c);
     glow(c, 18, f->fade);
     CGContextSetLineWidth(c, 4);
-    stroke_yellow(c, f->fade);
+    stroke_accent(c, f->fade);
     circle_path(c, f->center, radius);
     CGContextStrokePath(c);
 }
@@ -499,6 +502,7 @@ static struct {
     int edge, style, direction;
     bool shrink;
     double start, duration;
+    CGFloat color[3];
 } gEdge;
 
 static FsOverlayPanel *gLocatePanel;
@@ -507,6 +511,7 @@ static struct {
     bool active, full_screen;
     int style;
     double start;
+    CGFloat color[3];
 } gLocate;
 
 static NSScreen *screen_at(NSPoint point) {
@@ -592,6 +597,7 @@ static void paint_edge(CGContextRef c, CGSize size) {
     }
     f.t = CACurrentMediaTime() - gEdge.start;
     f.p = clamp01(f.t / gEdge.duration);
+    memcpy(gAccent, gEdge.color, sizeof gAccent);
     CGContextSaveGState(c);
     render(&f);
     CGContextRestoreGState(c);
@@ -608,6 +614,7 @@ static void paint_locate(CGContextRef c, CGSize size) {
     }
     LocateFrame f = { .c = c, .size = size, .center = center, .t = t };
     f.fade = clamp01((kLocateSeconds - t) / kLocateFade);
+    memcpy(gAccent, gLocate.color, sizeof gAccent);
     CGContextSaveGState(c);
     kLocateRenderers[gLocate.style](&f);
     CGContextRestoreGState(c);
@@ -617,9 +624,10 @@ static void paint_locate(CGContextRef c, CGSize size) {
 
 /// Starts the countdown on one edge of a display. The display is given in CoreGraphics'
 /// global coordinates (y down from the top of the main display). `elapsed` is how much of
-/// the wait has already passed. A preview takes itself away at the end.
+/// the wait has already passed. A preview takes itself away at the end. The colour is
+/// red, green and blue from 0 to 1.
 void fs_overlay_edge_begin(double x, double y, double w, double h, int edge, int style, int direction, bool shrink,
-                           double elapsed, double duration, bool preview) {
+                           double elapsed, double duration, bool preview, double red, double green, double blue) {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (style <= 0 || style >= (int)(sizeof kEdgeRenderers / sizeof *kEdgeRenderers)) return;
         if (!gEdgePanel) {
@@ -644,6 +652,9 @@ void fs_overlay_edge_begin(double x, double y, double w, double h, int edge, int
         gEdge.shrink = shrink;
         gEdge.duration = duration > 0.05 ? duration : 0.05;
         gEdge.start = CACurrentMediaTime() - elapsed;
+        gEdge.color[0] = red;
+        gEdge.color[1] = green;
+        gEdge.color[2] = blue;
         [gEdgePanel setFrame:strip display:NO];
         gEdgeView.needsDisplay = YES;
         [gEdgePanel orderFrontRegardless];
@@ -659,7 +670,7 @@ void fs_overlay_edge_end(void) {
 }
 
 /// Shows where the cursor is, for a moment.
-void fs_overlay_locate(int style) {
+void fs_overlay_locate(int style, double red, double green, double blue) {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (style < 0 || style >= (int)(sizeof kLocateRenderers / sizeof *kLocateRenderers)) return;
         if (!gLocatePanel) {
@@ -676,6 +687,9 @@ void fs_overlay_locate(int style) {
         gLocate.full_screen = full_screen;
         gLocate.style = style;
         gLocate.start = CACurrentMediaTime();
+        gLocate.color[0] = red;
+        gLocate.color[1] = green;
+        gLocate.color[2] = blue;
         [gLocatePanel setFrame:frame display:NO];
         gLocateView.needsDisplay = YES;
         [gLocatePanel orderFrontRegardless];

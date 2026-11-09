@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.0 — 2026-11-09
+
+- Effect colours: the screen-edge countdown and the find-the-cursor highlight each have their own colour (seven ready-made, any other from the picker). `set edge.anim_color #0A84FF`, `set locate.color #34C759`
+- Random effects: choose **Random** for the edge countdown or the highlight and each one shows a different effect
+- A larger settings window (840×840 to start) with two columns on the Switching and General tabs; the Switching tab fits without scrolling
+
 ## 0.7.1 — 2026-11-09
 
 - After a Homebrew upgrade the running app starts the new version and hands over, so there is no need to open it again (this takes effect from the upgrade after 0.7.1)
