@@ -24,9 +24,10 @@ extern "C" {
         red: f64,
         green: f64,
         blue: f64,
+        scale: f64,
     );
     fn fs_overlay_edge_end();
-    fn fs_overlay_locate(style: i32, red: f64, green: f64, blue: f64);
+    fn fs_overlay_locate(style: i32, red: f64, green: f64, blue: f64, scale: f64);
 }
 
 static READY: AtomicBool = AtomicBool::new(false);
@@ -70,6 +71,7 @@ pub fn edge_begin(edges: &Edges, edge: Edge, display: &Rect, elapsed: Duration, 
             red,
             green,
             blue,
+            f64::from(edges.anim_size) / 100.0,
         );
     }
 }
@@ -87,6 +89,6 @@ pub fn locate(locate: &Locate) {
     if ready() {
         let (red, green, blue) = components(&locate.color);
         // Safety: plain values; the call only queues work for the main thread.
-        unsafe { fs_overlay_locate(locate.style.resolved() as i32, red, green, blue) }
+        unsafe { fs_overlay_locate(locate.style.resolved() as i32, red, green, blue, f64::from(locate.size) / 100.0) }
     }
 }

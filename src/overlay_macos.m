@@ -18,7 +18,7 @@ enum { EDGE_LEFT, EDGE_RIGHT, EDGE_TOP, EDGE_BOTTOM };
 enum { DIR_CLOCKWISE, DIR_COUNTERCLOCKWISE, DIR_BOTH };
 
 /// How far into the screen the edge overlay reaches.
-static const CGFloat kStripDepth = 240;
+static const CGFloat kStripDepth = 360;
 static const CGFloat kLocateSide = 420;
 static const double kLocateSeconds = 1.3;
 static const double kLocateFade = 0.35;
@@ -82,6 +82,8 @@ typedef struct {
     double t;
     int direction;
     bool shrink;
+    /// The chosen size; the drawing is scaled by it around the anchor.
+    double zoom;
 } EdgeFrame;
 
 typedef void (*EdgeRenderer)(const EdgeFrame *);
@@ -233,7 +235,8 @@ static void edge_laser(const EdgeFrame *f) {
     const double inset = 3;
     double here = f->anchor.x * f->along.dx + f->anchor.y * f->along.dy;
     double total = f->size.width * f->along.dx + f->size.height * f->along.dy;
-    double ends[2] = { -here, total - here };
+    // The beams start at the display's ends whatever the size.
+    double ends[2] = { -here / f->zoom, (total - here) / f->zoom };
     double closing = f->p * f->p * (3 - 2 * f->p);
     double fade = 1 - smooth(0.95, 1.0, f->p);
     int frame = (int)floor(f->t * 60);
@@ -385,6 +388,8 @@ typedef struct {
     double t;
     /// 1 until the fade-out, then down to 0.
     double fade;
+    /// The chosen size, for the spotlight; the other effects are scaled as a whole.
+    double scale;
 } LocateFrame;
 
 typedef void (*LocateRenderer)(const LocateFrame *);
@@ -432,14 +437,15 @@ static void locate_radar(const LocateFrame *f) {
 static void locate_spotlight(const LocateFrame *f) {
     CGContextRef c = f->c;
     double closing = 1 - pow(1 - clamp01(f->t / 0.4), 3);
-    double radius = 600 - 490 * closing;
+    // Only the lit circle follows the size: the darkening always covers the display.
+    double radius = (600 - 490 * closing) * f->scale;
     double dim = 0.5 * clamp01(f->t / 0.2) * f->fade;
     CGContextSetRGBFillColor(c, 0, 0, 0, dim);
     CGContextAddRect(c, CGRectMake(0, 0, f->size.width, f->size.height));
     circle_path(c, f->center, radius);
     CGContextEOFillPath(c);
     glow(c, 18, f->fade);
-    CGContextSetLineWidth(c, 4);
+    CGContextSetLineWidth(c, 4 * f->scale);
     stroke_accent(c, f->fade);
     circle_path(c, f->center, radius);
     CGContextStrokePath(c);
@@ -503,6 +509,7 @@ static struct {
     bool shrink;
     double start, duration;
     CGFloat color[3];
+    CGFloat scale;
 } gEdge;
 
 static FsOverlayPanel *gLocatePanel;
@@ -512,6 +519,7 @@ static struct {
     int style;
     double start;
     CGFloat color[3];
+    CGFloat scale;
 } gLocate;
 
 static NSScreen *screen_at(NSPoint point) {
@@ -546,7 +554,8 @@ static void tick(void) {
         } else {
             if (!gLocate.full_screen) {
                 NSPoint m = NSEvent.mouseLocation;
-                [gLocatePanel setFrameOrigin:NSMakePoint(m.x - kLocateSide / 2, m.y - kLocateSide / 2)];
+                CGFloat side = kLocateSide * gLocate.scale;
+                [gLocatePanel setFrameOrigin:NSMakePoint(m.x - side / 2, m.y - side / 2)];
             }
             gLocateView.needsDisplay = YES;
         }
@@ -573,7 +582,7 @@ static void paint_edge(CGContextRef c, CGSize size) {
     NSPoint m = NSEvent.mouseLocation;
     NSPoint origin = gEdgePanel.frame.origin;
     CGPoint local = CGPointMake(m.x - origin.x, m.y - origin.y);
-    EdgeFrame f = { .c = c, .size = size, .direction = gEdge.direction, .shrink = gEdge.shrink };
+    EdgeFrame f = { .c = c, .size = size, .direction = gEdge.direction, .shrink = gEdge.shrink, .zoom = gEdge.scale };
     switch (gEdge.edge) {
         case EDGE_LEFT:
             f.anchor = CGPointMake(0, local.y);
@@ -599,6 +608,10 @@ static void paint_edge(CGContextRef c, CGSize size) {
     f.p = clamp01(f.t / gEdge.duration);
     memcpy(gAccent, gEdge.color, sizeof gAccent);
     CGContextSaveGState(c);
+    // The chosen size: everything grows or shrinks around the point at the edge.
+    CGContextTranslateCTM(c, f.anchor.x, f.anchor.y);
+    CGContextScaleCTM(c, gEdge.scale, gEdge.scale);
+    CGContextTranslateCTM(c, -f.anchor.x, -f.anchor.y);
     render(&f);
     CGContextRestoreGState(c);
 }
@@ -612,10 +625,15 @@ static void paint_locate(CGContextRef c, CGSize size) {
         NSPoint origin = gLocatePanel.frame.origin;
         center = CGPointMake(m.x - origin.x, m.y - origin.y);
     }
-    LocateFrame f = { .c = c, .size = size, .center = center, .t = t };
+    LocateFrame f = { .c = c, .size = size, .center = center, .t = t, .scale = gLocate.full_screen ? gLocate.scale : 1 };
     f.fade = clamp01((kLocateSeconds - t) / kLocateFade);
     memcpy(gAccent, gLocate.color, sizeof gAccent);
     CGContextSaveGState(c);
+    if (!gLocate.full_screen) {
+        CGContextTranslateCTM(c, center.x, center.y);
+        CGContextScaleCTM(c, gLocate.scale, gLocate.scale);
+        CGContextTranslateCTM(c, -center.x, -center.y);
+    }
     kLocateRenderers[gLocate.style](&f);
     CGContextRestoreGState(c);
 }
@@ -627,7 +645,8 @@ static void paint_locate(CGContextRef c, CGSize size) {
 /// the wait has already passed. A preview takes itself away at the end. The colour is
 /// red, green and blue from 0 to 1.
 void fs_overlay_edge_begin(double x, double y, double w, double h, int edge, int style, int direction, bool shrink,
-                           double elapsed, double duration, bool preview, double red, double green, double blue) {
+                           double elapsed, double duration, bool preview, double red, double green, double blue,
+                           double scale) {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (style <= 0 || style >= (int)(sizeof kEdgeRenderers / sizeof *kEdgeRenderers)) return;
         if (!gEdgePanel) {
@@ -655,6 +674,7 @@ void fs_overlay_edge_begin(double x, double y, double w, double h, int edge, int
         gEdge.color[0] = red;
         gEdge.color[1] = green;
         gEdge.color[2] = blue;
+        gEdge.scale = scale > 0.1 ? scale : 1;
         [gEdgePanel setFrame:strip display:NO];
         gEdgeView.needsDisplay = YES;
         [gEdgePanel orderFrontRegardless];
@@ -670,7 +690,7 @@ void fs_overlay_edge_end(void) {
 }
 
 /// Shows where the cursor is, for a moment.
-void fs_overlay_locate(int style, double red, double green, double blue) {
+void fs_overlay_locate(int style, double red, double green, double blue, double scale) {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (style < 0 || style >= (int)(sizeof kLocateRenderers / sizeof *kLocateRenderers)) return;
         if (!gLocatePanel) {
@@ -681,8 +701,9 @@ void fs_overlay_locate(int style, double red, double green, double blue) {
         NSPoint m = NSEvent.mouseLocation;
         // Only the spotlight darkens the whole display; the others follow the cursor.
         bool full_screen = kLocateRenderers[style] == locate_spotlight;
+        CGFloat side = kLocateSide * (scale > 0.1 ? scale : 1);
         NSRect frame = full_screen ? screen_at(m).frame
-                                   : NSMakeRect(m.x - kLocateSide / 2, m.y - kLocateSide / 2, kLocateSide, kLocateSide);
+                                   : NSMakeRect(m.x - side / 2, m.y - side / 2, side, side);
         gLocate.active = true;
         gLocate.full_screen = full_screen;
         gLocate.style = style;
@@ -690,6 +711,7 @@ void fs_overlay_locate(int style, double red, double green, double blue) {
         gLocate.color[0] = red;
         gLocate.color[1] = green;
         gLocate.color[2] = blue;
+        gLocate.scale = scale > 0.1 ? scale : 1;
         [gLocatePanel setFrame:frame display:NO];
         gLocateView.needsDisplay = YES;
         [gLocatePanel orderFrontRegardless];
