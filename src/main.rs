@@ -72,6 +72,8 @@ USAGE:
                               set locate.hotkey ctrl+alt+l     its shortcut (none = off)
                               set locate.arrival true          when the mouse arrives from another computer
                               set locate.shake true            when the mouse is shaken
+                              set check_updates true           look for a new version at start and daily
+                              set auto_update true             install it and restart (false = only show it)
     flockswitch help
 
 Set RUST_LOG=debug for more detail.";

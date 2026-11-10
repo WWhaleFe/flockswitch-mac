@@ -9,7 +9,6 @@ use crate::shared::{Shared, Status};
 use anyhow::Result;
 use auto_launch::{AutoLaunch, AutoLaunchBuilder, MacOSLaunchMode};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -23,7 +22,7 @@ enum Action {
     Enabled,
     Settings,
     CheckUpdate,
-    DownloadUpdate,
+    InstallUpdate,
     ShowDownload,
     ReleasePage,
     Report,
@@ -259,26 +258,31 @@ impl Ui {
             U::Idle => None,
             U::Checking => Some((t.update_checking.to_string(), false)),
             U::UpToDate => Some((format!("✓ {}", t.update_up_to_date), false)),
-            U::Available(r) | U::Downloading(r) | U::DownloadFailed(r) => {
+            U::Available(r) | U::Downloading(r) | U::Installing(r) => {
                 Some((format!("● {} {}", t.update_available, r.version), false))
             }
+            U::UpdateFailed(r, _) => Some((format!("● {} {} — {}", t.update_available, r.version, t.update_install_failed), false)),
             U::Downloaded(_) => Some((format!("✓ {}", t.update_downloaded), false)),
+            U::Installed(_) => Some((format!("✓ {}", t.update_installed), false)),
             U::Failed => Some((t.menu_check_failed.to_string(), true)),
         };
         if let Some((text, retry)) = state_line {
             let item = if retry { self.item(text, Action::CheckUpdate) } else { MenuItem::new(text, false, None) };
             let _ = menu.append(&item);
         }
-        let checking = matches!(st.update, U::Checking);
+        let checking = matches!(st.update, U::Checking) || st.update.busy();
         let check = MenuItem::new(t.menu_check_update, !checking, None);
         self.actions.insert(check.id().clone(), Action::CheckUpdate);
         let _ = menu.append(&check);
         match &st.update {
-            U::Available(_) | U::DownloadFailed(_) => {
-                let _ = menu.append(&self.item(t.menu_download, Action::DownloadUpdate));
+            U::Available(_) | U::UpdateFailed(..) => {
+                let _ = menu.append(&self.item(t.menu_install, Action::InstallUpdate));
             }
             U::Downloading(_) => {
                 let _ = menu.append(&MenuItem::new(t.update_downloading, false, None));
+            }
+            U::Installing(_) => {
+                let _ = menu.append(&MenuItem::new(t.update_installing, false, None));
             }
             U::Downloaded(_) => {
                 let _ = menu.append(&self.item(t.menu_show_download, Action::ShowDownload));
@@ -304,13 +308,12 @@ impl Ui {
             Action::Settings => open_settings_window(),
             Action::CheckUpdate => {
                 let shared = self.shared.clone();
-                std::thread::spawn(move || {
-                    crate::update::check_into(&shared);
-                });
+                std::thread::spawn(move || check_and_install(&shared));
             }
-            Action::DownloadUpdate => match self.shared.status().update {
-                crate::update::UpdateState::Available(r) | crate::update::UpdateState::DownloadFailed(r) => {
-                    crate::update::download_into(self.shared.clone(), r)
+            // Asked for: an app that cannot replace itself gets the file in Downloads.
+            Action::InstallUpdate => match self.shared.status().update {
+                crate::update::UpdateState::Available(r) | crate::update::UpdateState::UpdateFailed(r, _) => {
+                    crate::update::install_into(self.shared.clone(), r, true)
                 }
                 _ => {}
             },
@@ -321,7 +324,7 @@ impl Ui {
             }
             Action::ReleasePage => {
                 let page = match self.shared.status().update {
-                    crate::update::UpdateState::Available(r) => r.page,
+                    crate::update::UpdateState::Available(r) | crate::update::UpdateState::UpdateFailed(r, _) => r.page,
                     _ => crate::update::RELEASES_PAGE.to_string(),
                 };
                 crate::update::open_url(&page);
@@ -334,6 +337,17 @@ impl Ui {
         }
         self.refresh();
         false
+    }
+}
+
+/// Looks for a new version and, with automatic install on, installs it (once: a failed
+/// install waits for the next check). An app that cannot replace itself where it is
+/// just shows the new version, without opening Downloads unasked.
+fn check_and_install(shared: &Shared) {
+    if let crate::update::UpdateState::Available(r) = crate::update::check_into(shared) {
+        if shared.config().auto_update {
+            crate::update::install_with_status(shared, r, false);
+        }
     }
 }
 
@@ -351,13 +365,9 @@ fn spawn_update_check(shared: Arc<Shared>) {
                 std::thread::sleep(Duration::from_secs(1));
             }
             wait = crate::update::CHECK_INTERVAL;
-            // Leave a download in progress or done alone.
-            let busy = matches!(
-                shared.status().update,
-                crate::update::UpdateState::Downloading(_) | crate::update::UpdateState::Downloaded(_)
-            );
-            if shared.config().check_updates && !busy {
-                crate::update::check_into(&shared);
+            // Leave a download or install in progress or done alone.
+            if shared.config().check_updates && !shared.status().update.busy() {
+                check_and_install(&shared);
             }
         }
     });
@@ -368,32 +378,19 @@ const REPLACEMENT_CHECK: Duration = Duration::from_secs(5);
 /// Homebrew clears the new app's quarantine flag a moment after moving it into place.
 const REPLACEMENT_SETTLE: Duration = Duration::from_secs(5);
 
-/// The .app folder an executable inside one belongs to.
-fn bundle_of(exe: &Path) -> Option<PathBuf> {
-    let macos = exe.parent()?;
-    let contents = macos.parent()?;
-    let bundle = contents.parent()?;
-    (macos.ends_with("Contents/MacOS") && bundle.extension().is_some_and(|e| e == "app")).then(|| bundle.to_path_buf())
-}
-
-/// The version an Info.plist states.
-fn plist_version(text: &str) -> Option<&str> {
-    let (_, rest) = text.split_once("<key>CFBundleShortVersionString</key>")?;
-    let (_, rest) = rest.split_once("<string>")?;
-    Some(rest.split_once("</string>")?.0.trim())
-}
-
 /// `brew upgrade` swaps the app while this copy keeps running, and cannot start the new
 /// one itself (Homebrew runs a cask's scripts sandboxed, where `open` fails). So the
 /// running copy starts it; the new copy then asks this one to quit and takes over.
+/// An update installed by flockswitch itself (update::install, from this process or
+/// the settings window) swaps the same bundle and is picked up the same way.
 fn spawn_replacement_watch(shared: Arc<Shared>) {
-    let Some(bundle) = std::env::current_exe().ok().and_then(|e| bundle_of(&e)) else { return };
+    let Some(bundle) = crate::update::running_bundle() else { return };
     std::thread::spawn(move || {
         while !shared.stopped() {
             std::thread::sleep(REPLACEMENT_CHECK);
             // Unreadable while the app is being swapped: look again.
             let Ok(text) = std::fs::read_to_string(bundle.join("Contents/Info.plist")) else { continue };
-            if plist_version(&text).is_none_or(|v| v == env!("CARGO_PKG_VERSION")) {
+            if crate::update::plist_version(&text).is_none_or(|v| v == env!("CARGO_PKG_VERSION")) {
                 continue;
             }
             log::info!("a new version has replaced this app; starting it");
@@ -415,25 +412,5 @@ pub fn open_settings_window() {
             }
         }
         Err(e) => log::warn!("cannot open the settings window: {e}"),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn finds_the_app_bundle() {
-        let exe = Path::new("/Applications/flockswitch.app/Contents/MacOS/flockswitch");
-        assert_eq!(bundle_of(exe), Some(PathBuf::from("/Applications/flockswitch.app")));
-        assert_eq!(bundle_of(Path::new("/opt/homebrew/bin/flockswitch")), None);
-        assert_eq!(bundle_of(Path::new("/x/target/release/flockswitch")), None);
-    }
-
-    #[test]
-    fn reads_the_plist_version() {
-        let text = "<key>CFBundleName</key><string>a</string>\n  <key>CFBundleShortVersionString</key><string>0.7.1</string>";
-        assert_eq!(plist_version(text), Some("0.7.1"));
-        assert_eq!(plist_version("<key>CFBundleName</key><string>a</string>"), None);
     }
 }

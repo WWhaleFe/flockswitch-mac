@@ -344,10 +344,20 @@ enum UpdateUi {
     Checking,
     UpToDate,
     Available(Release),
+    /// The check failed, and why.
     Failed(String),
     Downloading,
-    Downloaded(std::path::PathBuf),
+    Installing,
+    /// In place; the window closes and opens again from the new version at this time.
+    Installed(Instant),
+    /// The app could not be replaced where it is (why), so the file went to Downloads.
+    Downloaded(std::path::PathBuf, String),
+    /// Downloading or installing failed, and why.
+    UpdateFailed(Release, String),
 }
+
+/// How long "Installed — restarting" shows before the window reopens as the new version.
+const REOPEN_AFTER_INSTALL: Duration = Duration::from_secs(2);
 
 impl SettingsApp {
     fn new(ctx: &egui::Context, raise: Arc<AtomicBool>, show_update: bool) -> SettingsApp {
@@ -379,20 +389,32 @@ impl SettingsApp {
             color_draft: None,
         };
         app.refresh();
+        // Opening the window only shows a new version; "Check now" may install it.
         if show_update || app.cfg.check_updates {
-            app.check_update(ctx);
+            app.check_update(ctx, false);
         }
         app
     }
 
-    /// Asks GitHub for the latest version in the background.
-    fn check_update(&self, ctx: &egui::Context) {
+    /// Asks GitHub for the latest version in the background, and with `install` set
+    /// (Check now, with automatic install on) installs a newer one.
+    fn check_update(&self, ctx: &egui::Context, install: bool) {
         let (state, ctx) = (self.update.clone(), ctx.clone());
         *state.lock().unwrap() = UpdateUi::Checking;
         std::thread::spawn(move || {
             let next = match update::latest() {
-                Ok(r) if r.is_newer_than_this_build() => UpdateUi::Available(r),
-                Ok(_) => UpdateUi::UpToDate,
+                Ok(r) if r.is_newer_than_this_build() => {
+                    log::info!("update check: latest {} (newer)", r.version);
+                    if install {
+                        install_update(&state, &ctx, r, false);
+                        return;
+                    }
+                    UpdateUi::Available(r)
+                }
+                Ok(r) => {
+                    log::info!("update check: latest {} (up to date)", r.version);
+                    UpdateUi::UpToDate
+                }
                 Err(e) => {
                     log::info!("update check failed: {e:#}");
                     UpdateUi::Failed(format!("{e:#}"))
@@ -403,25 +425,11 @@ impl SettingsApp {
         });
     }
 
-    /// Downloads the new version into Downloads and shows it in Finder.
-    fn download_update(&self, ctx: &egui::Context, release: Release) {
-        let Some((name, url, sums)) = release.asset.clone() else {
-            update::open_url(&release.page);
-            return;
-        };
+    /// "Update now": installs the new version in the background, or, when this app
+    /// cannot be replaced where it is, downloads it into Downloads and shows it.
+    fn start_install(&self, ctx: &egui::Context, release: Release) {
         let (state, ctx) = (self.update.clone(), ctx.clone());
-        *state.lock().unwrap() = UpdateUi::Downloading;
-        std::thread::spawn(move || {
-            let next = match update::download(&name, &url, &sums) {
-                Ok(path) => {
-                    update::reveal(&path);
-                    UpdateUi::Downloaded(path)
-                }
-                Err(e) => UpdateUi::Failed(format!("{e:#}")),
-            };
-            *state.lock().unwrap() = next;
-            ctx.request_repaint();
-        });
+        std::thread::spawn(move || install_update(&state, &ctx, release, true));
     }
 
     /// Re-reads settings, the remembered devices and what the engine sees, so the window
@@ -467,6 +475,32 @@ impl SettingsApp {
     }
 }
 
+/// Installs `release` (update::install), showing each step in the update card.
+fn install_update(state: &Mutex<UpdateUi>, ctx: &egui::Context, release: Release, or_download: bool) {
+    let set = |next: UpdateUi| {
+        *state.lock().unwrap() = next;
+        ctx.request_repaint();
+    };
+    let outcome = update::install(&release, or_download, |step| {
+        set(match step {
+            update::Step::Downloading => UpdateUi::Downloading,
+            update::Step::Installing => UpdateUi::Installing,
+        })
+    });
+    set(match outcome {
+        update::Outcome::Installed(_) => {
+            ctx.request_repaint_after(REOPEN_AFTER_INSTALL);
+            UpdateUi::Installed(Instant::now())
+        }
+        update::Outcome::Downloaded(path, why) => UpdateUi::Downloaded(path, why),
+        update::Outcome::NotInstallable(_) => UpdateUi::Available(release),
+        update::Outcome::Failed(why) => UpdateUi::UpdateFailed(release, why),
+    });
+}
+
+/// Set when the window closes itself after installing an update.
+static REOPEN: AtomicBool = AtomicBool::new(false);
+
 impl eframe::App for SettingsApp {
     /// Runs even while the window is minimized or fully covered (when `ui` does not),
     /// so "Settings…" can still bring it back.
@@ -475,8 +509,25 @@ impl eframe::App for SettingsApp {
     }
 
     /// Closed while recording a shortcut: give the tray app its shortcuts back now.
+    /// Closed after installing an update: open again from the new version once this
+    /// process (and its one-window lock) is gone.
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.stop_recording();
+        if REOPEN.load(Ordering::SeqCst) {
+            match std::env::current_exe() {
+                Ok(exe) => {
+                    log::info!("update: opening the settings window again from the new version");
+                    let spawned = std::process::Command::new("/bin/sh")
+                        .args(["-c", "sleep 2; exec \"$0\" settings update"])
+                        .arg(exe)
+                        .spawn();
+                    if let Err(e) = spawned {
+                        log::warn!("cannot open the settings window again: {e}");
+                    }
+                }
+                Err(e) => log::warn!("cannot open the settings window again: {e}"),
+            }
+        }
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
@@ -499,6 +550,12 @@ impl eframe::App for SettingsApp {
             self.refresh();
         }
         ctx.request_repaint_after(REFRESH);
+        // Installed: the menu-bar app restarts by itself; this window closes and opens
+        // again as the new version (not while the haptics window holds it).
+        let installed = matches!(*self.update.lock().unwrap(), UpdateUi::Installed(at) if at.elapsed() >= REOPEN_AFTER_INSTALL);
+        if installed && self.haptics_dialog.is_none() && !REOPEN.swap(true, Ordering::SeqCst) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         if let Some(n) = self.recording {
             self.capture_shortcut(&ctx, t, n);
         }
@@ -1408,7 +1465,10 @@ impl SettingsApp {
                 UpdateUi::Available(r) => (format!("{} {}", t.update_available, r.version), p.accent),
                 UpdateUi::Failed(_) => (t.update_failed.to_string(), p.amber),
                 UpdateUi::Downloading => (t.update_downloading.to_string(), p.muted),
-                UpdateUi::Downloaded(_) => (t.update_downloaded.to_string(), p.green),
+                UpdateUi::Installing => (t.update_installing.to_string(), p.muted),
+                UpdateUi::Installed(_) => (t.update_installed.to_string(), p.green),
+                UpdateUi::Downloaded(..) => (t.update_downloaded.to_string(), p.green),
+                UpdateUi::UpdateFailed(..) => (t.update_install_failed.to_string(), p.amber),
             };
             ui.horizontal(|ui| {
                 ui.label(RichText::new(format!("{} {}", t.update_current, env!("CARGO_PKG_VERSION"))).size(14.0));
@@ -1416,30 +1476,35 @@ impl SettingsApp {
                     ui.label(RichText::new(status).size(13.0).color(color));
                 });
             });
-            if let UpdateUi::Failed(why) = &state {
-                hint(ui, p, why);
+            match &state {
+                UpdateUi::Failed(why) | UpdateUi::UpdateFailed(_, why) => hint(ui, p, why),
+                UpdateUi::Downloaded(_, why) => hint(ui, p, &format!("{}: {why}", t.update_only_downloaded)),
+                _ => {}
             }
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 match &state {
-                    UpdateUi::Available(r) => {
-                        if button(ui, p, t.update_download, ButtonKind::Primary).clicked() {
-                            self.download_update(&ctx, r.clone());
+                    UpdateUi::Available(r) | UpdateUi::UpdateFailed(r, _) => {
+                        if button(ui, p, t.update_install, ButtonKind::Primary).clicked() {
+                            self.start_install(&ctx, r.clone());
                         }
                         if button(ui, p, t.update_page, ButtonKind::Plain).clicked() {
                             update::open_url(&r.page);
                         }
                     }
-                    UpdateUi::Downloaded(path) => {
+                    UpdateUi::Downloaded(path, _) => {
                         if button(ui, p, t.update_show, ButtonKind::Plain).clicked() {
                             update::reveal(path);
                         }
                     }
-                    UpdateUi::Checking | UpdateUi::Downloading => {}
+                    // Nothing to press meanwhile; the row keeps its height so the card stays put.
+                    UpdateUi::Checking | UpdateUi::Downloading | UpdateUi::Installing | UpdateUi::Installed(_) => {
+                        ui.allocate_exact_size(Vec2::new(0.0, CONTROL_HEIGHT), Sense::hover());
+                    }
                     _ => {
                         if button(ui, p, t.update_check, ButtonKind::Plain).clicked() {
-                            self.check_update(&ctx);
+                            self.check_update(&ctx, self.cfg.auto_update);
                         }
                         if button(ui, p, t.update_page, ButtonKind::Plain).clicked() {
                             update::open_url(update::RELEASES_PAGE);
@@ -1454,6 +1519,13 @@ impl SettingsApp {
                 self.apply(|c| c.check_updates = on);
             }
             hint(ui, p, t.update_auto_hint);
+            ui.add_space(4.0);
+            divider(ui, p);
+            let mut on = self.cfg.auto_update;
+            if switch_row(ui, p, t.auto_update, None, &mut on) {
+                self.apply(|c| c.auto_update = on);
+            }
+            hint(ui, p, t.auto_update_hint);
             ui.add_space(10.0);
         });
     }

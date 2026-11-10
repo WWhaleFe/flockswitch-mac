@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.10.0 — 2026-11-10
+
+- Automatic updates: when flockswitch finds a new version it downloads it, checks it against the release's SHA256SUMS.txt, puts it in place of the app and restarts into it. **Install updates automatically** in Settings → General (on by default, `set auto_update true|false`); when off, **Update now** in the settings window or the ⇄ menu installs it. If the app cannot be replaced where it is (for example a folder it may not write to), Update now saves the new version to Downloads as before. This first works for the version after 0.10.0; 0.10.0 itself is installed the old way
+- The haptics window's Feel button is now called Test
+
 ## 0.9.1 — 2026-11-10
 
 - Haptics window: each situation on one line (name, pulse, Feel, switch), and 'use haptics / strength' set apart from the situations with more room between rows

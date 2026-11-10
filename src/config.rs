@@ -518,6 +518,8 @@ pub struct Config {
     pub language: String,
     /// Look for a new version on GitHub at start and once a day.
     pub check_updates: bool,
+    /// Install a new version found by a check (and restart into it) without asking.
+    pub auto_update: bool,
     /// Per-button settings. (Tables last: TOML writes tables after plain values.)
     pub buttons: Buttons,
     /// Keyboard shortcuts, one per channel.
@@ -568,6 +570,7 @@ impl Default for Config {
             follow: vec!["all".into()],
             language: crate::i18n::system_language().into(),
             check_updates: true,
+            auto_update: true,
             buttons: Buttons::default(),
             hotkeys: Hotkeys::default(),
             edges: Edges::default(),
@@ -884,6 +887,7 @@ impl Config {
             "trigger_device" => self.trigger_device = value.trim().to_string(),
             "language" => self.language = value.trim().to_lowercase(),
             "check_updates" => self.check_updates = value.parse().context("check_updates must be true or false")?,
+            "auto_update" => self.auto_update = value.parse().context("auto_update must be true or false")?,
             // Which buttons are on, e.g. "wheel_mode,gesture" or "0x00C4,0x00C3".
             // `triggers` / `trigger_cid` are the names older versions used.
             "buttons" | "triggers" | "trigger_cid" => {
@@ -1326,5 +1330,19 @@ mod tests {
         assert_eq!(back.hotkeys, c.hotkeys);
         // Settings from before shortcuts existed get them off.
         assert!(!Config::parse("enabled = true").unwrap().hotkeys.on);
+    }
+
+    #[test]
+    fn auto_update() {
+        let mut c = Config::default();
+        assert!(c.check_updates && c.auto_update);
+        c.set("auto_update", "false").unwrap();
+        assert!(!c.auto_update);
+        assert!(c.set("auto_update", "maybe").is_err());
+        assert!(!c.auto_update, "an invalid value changes nothing");
+        let back = Config::parse(&toml::to_string_pretty(&c).unwrap()).unwrap();
+        assert!(!back.auto_update);
+        // Settings from before 0.10.0 install updates automatically too.
+        assert!(Config::parse("check_updates = false").unwrap().auto_update);
     }
 }
