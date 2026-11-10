@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.1 — 2026-11-10
+
+- Haptics window: each situation on one line (name, pulse, Feel, switch), and 'use haptics / strength' set apart from the situations with more room between rows
+- The language choice matches the other choice rows, and the settings window starts 870 high
+- Fixed Feel with a random pulse playing nothing, and the spotlight and laser falling short of the screen ends at small sizes
+
 ## 0.9.0 — 2026-11-10
 
 - Haptics settings tidied: the pulse as the mouse leaves and the one when it is back are switched on and off on their own, each with its pulse beside it. Waiting at an edge offers **Rising / Even**; the edge waveform, which went unused by default, is folded into that choice (`set haptics.arrive true|false`)

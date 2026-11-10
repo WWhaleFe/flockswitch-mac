@@ -330,7 +330,7 @@ struct HapticsDialog {
     position: Option<Pos2>,
 }
 
-const HAPTICS_DIALOG_SIZE: [f32; 2] = [470.0, 580.0];
+const HAPTICS_DIALOG_SIZE: [f32; 2] = [620.0, 440.0];
 
 fn haptics_viewport() -> egui::ViewportId {
     egui::ViewportId::from_hash_of("haptics-settings")
@@ -1197,9 +1197,14 @@ impl SettingsApp {
         let mut feel = None;
         egui::CentralPanel::default().frame(panel).show(ui, |ui| {
             egui::ScrollArea::vertical().auto_shrink([false, false]).max_height(ui.available_height() - 46.0).show(ui, |ui| {
+                // What haptics are, then each situation, in two cards with room between rows.
+                let mut on = d.on_switch || d.on_arrive || d.on_edge;
                 card(ui, p, |ui| {
-                    let mut on = d.on_switch || d.on_arrive || d.on_edge;
-                    if switch_row(ui, p, t.haptics_master, None, &mut on) {
+                    let before = on;
+                    dialog_row(ui, p, t.haptics_master, 48.0, |ui| {
+                        toggle(ui, p, t.haptics_master, &mut on);
+                    });
+                    if on != before {
                         d.on_switch = on;
                         d.on_arrive = on;
                         d.on_edge = on;
@@ -1208,48 +1213,39 @@ impl SettingsApp {
                     ui.add_enabled_ui(on, |ui| {
                         // 0 = as Logi Options+ sets it; otherwise the strength in percent.
                         let choices: [(u8, &str); 5] = [(0, t.haptics_follow), (25, "25%"), (50, "50%"), (75, "75%"), (100, "100%")];
-                        let width = (ui.available_width() * 0.8).min(340.0);
-                        labeled_row(ui, p, t.haptics_intensity, width, ROW_SMALL, |ui| segmented(ui, p, "haptic-intensity", &mut d.intensity, &choices, SEG_SMALL));
-                        divider(ui, p);
-                        // Each situation: on/off, then its pulse with a button to feel it.
-                        let pulses: Vec<(u8, &str)> =
-                            waveform::ALL.into_iter().zip(t.waveform_names).chain([(waveform::RANDOM, t.locate_random)]).collect();
-                        let width = (ui.available_width() * 0.7).min(320.0);
-                        switch_row(ui, p, t.haptics_switch, None, &mut d.on_switch);
-                        ui.add_enabled_ui(d.on_switch, |ui| {
-                            if pulse_row(ui, p, t, "pulse-leave", &mut d.switch_waveform, &pulses, width) {
-                                feel = Some(HapticPreview::Pulse(d.switch_waveform));
-                            }
-                        });
-                        divider(ui, p);
-                        switch_row(ui, p, t.haptics_arrive, None, &mut d.on_arrive);
-                        ui.add_enabled_ui(d.on_arrive, |ui| {
-                            if pulse_row(ui, p, t, "pulse-arrive", &mut d.arrive_waveform, &pulses, width) {
-                                feel = Some(HapticPreview::Pulse(d.arrive_waveform));
-                            }
-                        });
-                        divider(ui, p);
-                        switch_row(ui, p, t.haptics_edge, None, &mut d.on_edge);
-                        ui.add_enabled_ui(d.on_edge, |ui| {
-                            let modes = [(true, t.haptics_rising), (false, t.haptics_even)];
-                            labeled_row(ui, p, t.haptics_edge_mode, width, ROW_SMALL, |ui| {
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    ui.spacing_mut().item_spacing.x = 6.0;
-                                    if button(ui, p, t.haptics_feel, ButtonKind::Plain).clicked() {
-                                        feel = Some(HapticPreview::Edge { rising: d.progressive });
-                                    }
-                                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                                        segmented(ui, p, "edge-pattern", &mut d.progressive, &modes, SEG_SMALL)
-                                    })
-                                    .inner
-                                })
-                                .inner
-                            });
+                        dialog_row(ui, p, t.haptics_intensity, SITUATION_CONTROLS, |ui| {
+                            segmented(ui, p, "haptic-intensity", &mut d.intensity, &choices, SEG_SMALL);
                         });
                     });
-                    hint(ui, p, t.haptics_hint);
-                    ui.add_space(10.0);
                 });
+                ui.add_space(12.0);
+                card(ui, p, |ui| {
+                    ui.add_enabled_ui(on, |ui| {
+                        let pulses: Vec<(u8, &str)> =
+                            waveform::ALL.into_iter().zip(t.waveform_names).chain([(waveform::RANDOM, t.locate_random)]).collect();
+                        if situation_row(ui, p, t, t.haptics_switch, &mut d.on_switch, |ui| {
+                            combo(ui, "pulse-leave", &mut d.switch_waveform, &pulses);
+                        }) {
+                            feel = Some(HapticPreview::Pulse(d.switch_waveform));
+                        }
+                        divider(ui, p);
+                        if situation_row(ui, p, t, t.haptics_arrive, &mut d.on_arrive, |ui| {
+                            combo(ui, "pulse-arrive", &mut d.arrive_waveform, &pulses);
+                        }) {
+                            feel = Some(HapticPreview::Pulse(d.arrive_waveform));
+                        }
+                        divider(ui, p);
+                        let modes = [(true, t.haptics_rising), (false, t.haptics_even)];
+                        if situation_row(ui, p, t, t.haptics_edge, &mut d.on_edge, |ui| {
+                            segmented(ui, p, "edge-pattern", &mut d.progressive, &modes, SEG_SMALL);
+                        }) {
+                            feel = Some(HapticPreview::Edge { rising: d.progressive });
+                        }
+                    });
+                });
+                ui.add_space(8.0);
+                // Below the cards, wrapping to the window's width.
+                egui::Frame::new().inner_margin(Margin::symmetric(4, 0)).show(ui, |ui| hint(ui, p, t.haptics_hint));
                 if let Some(err) = &error {
                     ui.add_space(8.0);
                     ui.label(RichText::new(err).color(p.red));
@@ -1877,18 +1873,62 @@ fn size_row(ui: &mut Ui, p: Palette, t: &Texts, name: &str, size: &mut u16) -> b
     labeled_row(ui, p, t.effect_size, width, ROW_SMALL, |ui| segmented(ui, p, name, size, &choices, SEG_SMALL))
 }
 
-/// "Pulse" and the waveform to choose, with a button to feel it. True when that was pressed.
-fn pulse_row(ui: &mut Ui, p: Palette, t: &Texts, name: &str, value: &mut u8, options: &[(u8, &str)], width: f32) -> bool {
+/// Width of what sits right of a situation's name in the haptics window.
+const SITUATION_CONTROLS: f32 = 360.0;
+/// The haptics window's rows are taller than a card's usual ones, for air between them.
+const DIALOG_ROW: f32 = 50.0;
+
+/// A situation of the haptics window on one line: its name, the control that shapes its
+/// pulse, a button to feel it, and its switch. True when Feel was pressed.
+fn situation_row(ui: &mut Ui, p: Palette, t: &Texts, label: &str, on: &mut bool, control: impl FnOnce(&mut Ui)) -> bool {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), DIALOG_ROW), Sense::hover());
+    ui.painter().text(Pos2::new(rect.left(), rect.center().y), Align2::LEFT_CENTER, label, FontId::proportional(14.5), p.text);
+    let area = Rect::from_min_max(
+        Pos2::new(rect.right() - SITUATION_CONTROLS, rect.center().y - 15.0),
+        Pos2::new(rect.right(), rect.center().y + 15.0),
+    );
     let mut pressed = false;
-    labeled_row(ui, p, t.haptics_pulse, width, ROW_SMALL, |ui| {
+    ui.scope_builder(UiBuilder::new().max_rect(area), |ui| {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            pressed = button(ui, p, t.haptics_feel, ButtonKind::Plain).clicked();
-            combo(ui, name, value, options);
+            ui.spacing_mut().item_spacing.x = 8.0;
+            toggle(ui, p, label, on);
+            let enabled = *on;
+            ui.add_enabled_ui(enabled, |ui| {
+                pressed = button(ui, p, t.haptics_feel, ButtonKind::Plain).clicked();
+                control(ui);
+            });
         });
-        false
     });
     pressed
+}
+
+/// A row of the haptics window: its name, and a control `width` wide on the right.
+fn dialog_row(ui: &mut Ui, p: Palette, label: &str, width: f32, control: impl FnOnce(&mut Ui)) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), DIALOG_ROW), Sense::hover());
+    ui.painter().text(Pos2::new(rect.left(), rect.center().y), Align2::LEFT_CENTER, label, FontId::proportional(14.5), p.text);
+    let area = Rect::from_min_max(
+        Pos2::new(rect.right() - width, rect.center().y - 15.0),
+        Pos2::new(rect.right(), rect.center().y + 15.0),
+    );
+    ui.scope_builder(UiBuilder::new().max_rect(area), |ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), control);
+    });
+}
+
+/// The on/off switch of a row, on its own. True when flipped.
+fn toggle(ui: &mut Ui, p: Palette, label: &str, on: &mut bool) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(40.0, 24.0), Sense::click());
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    resp.widget_info(|| WidgetInfo::selected(Role::Switch, true, *on, label));
+    if resp.clicked() {
+        *on = !*on;
+    }
+    let how_on = ui.ctx().animate_bool_responsive(resp.id, *on);
+    let painter = ui.painter();
+    painter.rect_filled(rect, 12, p.track.lerp_to_gamma(p.accent, how_on));
+    let x = egui::lerp(rect.left() + 12.0..=rect.right() - 12.0, how_on);
+    painter.circle_filled(Pos2::new(x, rect.center().y), 9.5, Color32::WHITE);
+    resp.clicked()
 }
 
 /// An explanation on the left and buttons on the right. Returns the index clicked.
