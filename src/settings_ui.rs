@@ -3,9 +3,10 @@
 //! engine reloads within a second. Every change applies immediately and the window
 //! stays open, unlike a native menu that closes after each click.
 
+use crate::backup;
 use crate::config::{
     format_color, parse_color, pick, Config, EFFECT_SIZES, Edge, EdgeAnimDirection, EdgeAnimStyle, Gesture, Haptics, LocateStyle,
-    BUTTON_GESTURE, BUTTON_MIDDLE, BUTTON_WHEEL_MODE, EDGE_ANIM_STYLES,
+    ShakeKey, BUTTON_GESTURE, BUTTON_MIDDLE, BUTTON_WHEEL_MODE, EDGE_ANIM_STYLES, SHAKE_KEYS, SHAKE_TIMES,
 };
 use crate::device::waveform;
 use crate::hotkey::LOCATE;
@@ -31,6 +32,11 @@ const EDGES_TAB: u16 = 0xFFFE;
 const ICON_SIDE: u32 = 96;
 const ICON_RGBA: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/window-icon.rgba"));
 
+/// The settings window's size to start with, and the limits it may be resized within.
+const WINDOW_SIZE: [f32; 2] = [840.0, 870.0];
+const WINDOW_MIN: [f32; 2] = [760.0, 640.0];
+const WINDOW_MAX: [f32; 2] = [1200.0, 1100.0];
+
 /// Opens the window. `lock` keeps a second window from opening; a connection to it
 /// means "Settings…" was chosen again, so the window comes back to the front.
 /// `show_update` opens on the General tab (from the "new version" menu item).
@@ -44,9 +50,9 @@ pub fn run(lock: std::net::TcpListener, show_update: bool) -> Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_title(t.settings_title)
             .with_icon(icon)
-            .with_inner_size([840.0, 870.0])
-            .with_min_inner_size([760.0, 640.0])
-            .with_max_inner_size([1200.0, 1100.0])
+            .with_inner_size(WINDOW_SIZE)
+            .with_min_inner_size(WINDOW_MIN)
+            .with_max_inner_size(WINDOW_MAX)
             .with_maximize_button(false)
             .with_active(true),
         ..Default::default()
@@ -300,6 +306,70 @@ struct SettingsApp {
     confirm_reset: bool,
     /// A colour being dragged in the picker; saved when the mouse button comes up.
     color_draft: Option<(EffectColor, [u8; 3])>,
+    /// Keeps the window's size across displays with another scale.
+    size_guard: SizeGuard,
+    /// "Load settings…" is open: the files to choose from.
+    backup_picker: Option<BackupPicker>,
+    /// What the last save or load did, and whether it went well.
+    backup_note: Option<(String, bool)>,
+}
+
+/// The file picker of "Load settings…": the saved files, newest first, the one chosen
+/// (waiting for its confirmation) and why it could not be loaded.
+struct BackupPicker {
+    files: Vec<backup::Saved>,
+    chosen: Option<usize>,
+    error: Option<String>,
+    listed: Instant,
+}
+
+/// Keeps a window at its size in points. Moved to a display with another scale (a
+/// Retina screen and an ordinary one), a window could otherwise come out at another
+/// size in points, or outside its limits (Windows does this; macOS keeps the size in
+/// points itself, so here it is only a guard). While the scale is unchanged and the
+/// size within the limits, the size is remembered; when the scale changes, or the size
+/// leaves the limits, the remembered size is put back.
+#[derive(Default)]
+struct SizeGuard {
+    scale: Option<f32>,
+    size: Option<Vec2>,
+    /// After a scale change the system may still be resizing: until then nothing new
+    /// is remembered and the remembered size is put back.
+    settle_until: Option<Instant>,
+    sent: Option<Instant>,
+}
+
+/// How long after a scale change the size is still held.
+const SCALE_SETTLE: Duration = Duration::from_millis(1000);
+
+impl SizeGuard {
+    fn keep(&mut self, ctx: &egui::Context, min: Vec2, max: Vec2) {
+        let (scale, rect) = ctx.input(|i| (i.viewport().native_pixels_per_point, i.viewport().inner_rect));
+        let (Some(scale), Some(rect)) = (scale, rect) else { return };
+        let size = rect.size();
+        if self.scale.is_some_and(|s| (s - scale).abs() > 0.01) {
+            log::info!("settings window: display scale {:?} -> {scale}", self.scale);
+            self.settle_until = Some(Instant::now() + SCALE_SETTLE);
+        }
+        self.scale = Some(scale);
+        let settling = self.settle_until.is_some_and(|t| Instant::now() < t);
+        let fits = size.x >= min.x - 1.0 && size.y >= min.y - 1.0 && size.x <= max.x + 1.0 && size.y <= max.y + 1.0;
+        if !settling && fits {
+            self.size = Some(size);
+            return;
+        }
+        if settling {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
+        let Some(want) = self.size else { return };
+        let recently = self.sent.is_some_and(|t| t.elapsed() < Duration::from_millis(250));
+        if (want - size).length() < 1.0 || recently {
+            return;
+        }
+        log::info!("settings window: size {size:?} back to {want:?}");
+        self.sent = Some(Instant::now());
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(want));
+    }
 }
 
 /// Which on-screen effect a colour row sets.
@@ -328,6 +398,7 @@ struct HapticsDialog {
     opened_with: Haptics,
     /// Top left of the window, centred on the main window when opened.
     position: Option<Pos2>,
+    size_guard: SizeGuard,
 }
 
 const HAPTICS_DIALOG_SIZE: [f32; 2] = [620.0, 440.0];
@@ -387,28 +458,27 @@ impl SettingsApp {
             haptics_dialog: None,
             confirm_reset: false,
             color_draft: None,
+            size_guard: SizeGuard::default(),
+            backup_picker: None,
+            backup_note: None,
         };
         app.refresh();
-        // Opening the window only shows a new version; "Check now" may install it.
         if show_update || app.cfg.check_updates {
-            app.check_update(ctx, false);
+            app.check_update(ctx);
         }
         app
     }
 
-    /// Asks GitHub for the latest version in the background, and with `install` set
-    /// (Check now, with automatic install on) installs a newer one.
-    fn check_update(&self, ctx: &egui::Context, install: bool) {
+    /// Asks GitHub for the latest version in the background. It never installs: a newer
+    /// one is offered with "Update now" (automatic install is the menu-bar app's daily
+    /// check, with that setting on).
+    fn check_update(&self, ctx: &egui::Context) {
         let (state, ctx) = (self.update.clone(), ctx.clone());
         *state.lock().unwrap() = UpdateUi::Checking;
         std::thread::spawn(move || {
             let next = match update::latest() {
                 Ok(r) if r.is_newer_than_this_build() => {
                     log::info!("update check: latest {} (newer)", r.version);
-                    if install {
-                        install_update(&state, &ctx, r, false);
-                        return;
-                    }
                     UpdateUi::Available(r)
                 }
                 Ok(r) => {
@@ -425,8 +495,9 @@ impl SettingsApp {
         });
     }
 
-    /// "Update now": installs the new version in the background, or, when this app
-    /// cannot be replaced where it is, downloads it into Downloads and shows it.
+    /// "Update now": installs the new version in the background whatever the automatic
+    /// install setting, or, when this app cannot be replaced where it is, downloads it
+    /// into Downloads and shows it.
     fn start_install(&self, ctx: &egui::Context, release: Release) {
         let (state, ctx) = (self.update.clone(), ctx.clone());
         std::thread::spawn(move || install_update(&state, &ctx, release, true));
@@ -537,6 +608,7 @@ impl eframe::App for SettingsApp {
             self.title = t.settings_title;
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(t.settings_title.into()));
         }
+        self.size_guard.keep(&ctx, Vec2::from(WINDOW_MIN), Vec2::from(WINDOW_MAX));
         let p = Palette::new(ui.visuals().dark_mode);
         let panel = egui::Frame::new().fill(p.bg).inner_margin(Margin::symmetric(18, 12));
         // After uninstalling, show only the result: re-reading the settings now would
@@ -562,8 +634,7 @@ impl eframe::App for SettingsApp {
 
         // While the haptics window is open this one cannot be closed or used, and
         // coming back to it hands the focus straight on.
-        let modal = self.haptics_dialog.is_some();
-        if modal {
+        if self.haptics_dialog.is_some() {
             if ctx.input(|i| i.viewport().close_requested()) {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             }
@@ -571,6 +642,7 @@ impl eframe::App for SettingsApp {
                 ctx.send_viewport_cmd_to(haptics_viewport(), egui::ViewportCommand::Focus);
             }
         }
+        let modal = self.haptics_dialog.is_some() || self.backup_picker.is_some();
 
         // The header and the tabs stay in place; only the page below them scrolls.
         egui::CentralPanel::default().frame(panel).show(ui, |ui| {
@@ -618,6 +690,7 @@ impl eframe::App for SettingsApp {
                                 self.preferences_card(right, t, p);
                                 self.update_section(right, t, p);
                                 self.report_section(right, t, p);
+                                self.backup_section(right, t, p);
                                 self.maintenance_card(right, t, p);
                             });
                         }
@@ -635,6 +708,7 @@ impl eframe::App for SettingsApp {
             });
         });
         self.haptics_window(&ctx, t);
+        self.backup_window(&ctx, t, p);
     }
 }
 
@@ -761,7 +835,9 @@ impl SettingsApp {
     /// Keyboard shortcuts on/off and one shortcut per channel.
     fn shortcut_rows(&mut self, ui: &mut Ui, t: &Texts, p: Palette) {
         let mut on = self.cfg.hotkeys.on;
-        if switch_row(ui, p, t.hotkeys_title, None, &mut on) {
+        let (flipped, label) = switch_row_full(ui, p, t.hotkeys_title, None, &mut on);
+        info_icon(ui, p, Pos2::new(label.right() + 16.0, label.center().y), "hotkeys-help", t.hotkey_help);
+        if flipped {
             self.apply(|c| c.hotkeys.on = on);
             self.stop_recording();
         }
@@ -773,15 +849,15 @@ impl SettingsApp {
         ui.add_space(6.0);
         divider(ui, p);
         for n in 1..=3u8 {
-            self.shortcut_row(ui, t, p, n, &format!("{} {n}", t.channel));
+            self.shortcut_row(ui, t, p, n, &format!("{} {n}", t.channel), None);
         }
-        hint(ui, p, t.hotkey_rule);
         ui.add_space(10.0);
     }
 
     /// One recordable shortcut: its slot `n` (channel, or LOCATE), the keys and buttons
-    /// to change or clear them.
-    fn shortcut_row(&mut self, ui: &mut Ui, t: &Texts, p: Palette, n: u8, label: &str) {
+    /// to change or clear them, and an "i" after the label explaining `info` if given.
+    fn shortcut_row(&mut self, ui: &mut Ui, t: &Texts, p: Palette, n: u8, label: &str, info: Option<&str>) {
+        let top_left = ui.cursor().min;
         let width = (ui.available_width() * 0.66).min(300.0);
         let (mut start, mut clear) = (false, false);
         let key = self.cfg.shortcut(n).to_string();
@@ -808,6 +884,11 @@ impl SettingsApp {
             });
             false
         });
+        if let Some(text) = info {
+            let label_width = ui.painter().layout_no_wrap(label.to_string(), FontId::proportional(14.5), p.text).size().x;
+            let center = Pos2::new(top_left.x + label_width + 16.0, top_left.y + ROW_SMALL / 2.0);
+            info_icon(ui, p, center, &format!("shortcut-help-{n}"), text);
+        }
         if failed {
             hint(ui, p, t.hotkey_taken);
         }
@@ -1041,6 +1122,10 @@ impl SettingsApp {
                 self.error = Some(t.hotkey_duplicate.into());
                 return;
             }
+            if crate::hotkey::reserved(&text) {
+                self.error = Some(t.hotkey_reserved.into());
+                return;
+            }
             self.apply(|c| c.set_shortcut(n, &text));
             return;
         }
@@ -1206,7 +1291,7 @@ impl SettingsApp {
         let line = format!("{state} · {} {strength}", t.haptics_intensity);
         let mut open = false;
         section(ui, p, t.section_haptics, |ui| {
-            let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_NORMAL), Sense::hover());
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_SMALL), Sense::hover());
             ui.painter().text(Pos2::new(rect.left(), rect.center().y), Align2::LEFT_CENTER, &line, FontId::proportional(14.0), p.text);
             let width = button_width(ui, t.haptics_open, ButtonKind::Plain);
             let area = Rect::from_min_max(
@@ -1224,7 +1309,8 @@ impl SettingsApp {
                 .input(|i| i.viewport().outer_rect)
                 .map(|r| r.center() - Vec2::from(HAPTICS_DIALOG_SIZE) / 2.0);
             let current = self.cfg.haptics.clone();
-            self.haptics_dialog = Some(HapticsDialog { draft: current.clone(), opened_with: current, position });
+            self.haptics_dialog =
+                Some(HapticsDialog { draft: current.clone(), opened_with: current, position, size_guard: SizeGuard::default() });
         }
     }
 
@@ -1245,6 +1331,8 @@ impl SettingsApp {
 
     fn haptics_dialog_ui(&mut self, ui: &mut Ui, t: &Texts) {
         let Some(mut dialog) = self.haptics_dialog.take() else { return };
+        let size = Vec2::from(HAPTICS_DIALOG_SIZE);
+        dialog.size_guard.keep(ui.ctx(), size, size);
         let p = Palette::new(ui.visuals().dark_mode);
         let closing = ui.ctx().input(|i| i.viewport().close_requested());
         let (mut apply, mut ok, mut close) = (false, false, closing);
@@ -1374,7 +1462,7 @@ impl SettingsApp {
                 self.stop_recording();
             }
             if self.cfg.locate.on_hotkey {
-                self.shortcut_row(ui, t, p, LOCATE, t.locate_key);
+                self.shortcut_row(ui, t, p, LOCATE, t.locate_key, Some(t.hotkey_help));
             }
             divider(ui, p);
             let mut on = self.cfg.locate.on_arrival;
@@ -1386,12 +1474,33 @@ impl SettingsApp {
             if switch_row(ui, p, t.locate_shake, None, &mut on) {
                 self.apply(|c| c.locate.on_shake = on);
             }
+            if self.cfg.locate.on_shake {
+                self.shake_rows(ui, t, p);
+            }
         });
+    }
+
+    /// How long the mouse must be shaken, and a key to hold meanwhile.
+    fn shake_rows(&mut self, ui: &mut Ui, t: &Texts, p: Palette) {
+        let width = (ui.available_width() * 0.62).min(250.0);
+        let labels: Vec<String> = SHAKE_TIMES.iter().map(|&ms| format!("{}{}", ms as f64 / 1000.0, t.seconds_short)).collect();
+        let choices: Vec<(u64, &str)> = SHAKE_TIMES.iter().copied().zip(labels.iter().map(String::as_str)).collect();
+        let mut time = self.cfg.locate.shake_time_ms;
+        if labeled_row(ui, p, t.locate_shake_time, width, ROW_SMALL, |ui| segmented(ui, p, "shake-time", &mut time, &choices, SEG_SMALL)) {
+            self.apply(|c| c.locate.shake_time_ms = time);
+        }
+        let keys: Vec<(ShakeKey, &str)> = SHAKE_KEYS.into_iter().zip(t.shake_key_names).collect();
+        let mut key = self.cfg.locate.shake_key;
+        if labeled_row(ui, p, t.locate_shake_key, width, ROW_SMALL, |ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| combo(ui, "shake-key", &mut key, &keys)).inner
+        }) {
+            self.apply(|c| c.locate.shake_key = key);
+        }
     }
 
     /// The language, and starting at login.
     fn preferences_card(&mut self, ui: &mut Ui, t: &Texts, p: Palette) {
-        ui.add_space(12.0);
+        ui.add_space(10.0);
         card(ui, p, |ui| {
             let mut language = self.cfg.language.clone();
             let choices = [("ko", "한국어"), ("en", "English")];
@@ -1416,7 +1525,7 @@ impl SettingsApp {
 
     /// Putting the settings back, and uninstalling.
     fn maintenance_card(&mut self, ui: &mut Ui, t: &Texts, p: Palette) {
-        ui.add_space(12.0);
+        ui.add_space(10.0);
         card(ui, p, |ui| {
             let labels: &[(&str, ButtonKind)] = if self.confirm_reset {
                 &[(t.reset_confirm, ButtonKind::DangerFilled), (t.cancel, ButtonKind::Plain)]
@@ -1504,7 +1613,7 @@ impl SettingsApp {
                     }
                     _ => {
                         if button(ui, p, t.update_check, ButtonKind::Plain).clicked() {
-                            self.check_update(&ctx, self.cfg.auto_update);
+                            self.check_update(&ctx);
                         }
                         if button(ui, p, t.update_page, ButtonKind::Plain).clicked() {
                             update::open_url(update::RELEASES_PAGE);
@@ -1515,36 +1624,28 @@ impl SettingsApp {
             ui.add_space(6.0);
             divider(ui, p);
             let mut on = self.cfg.check_updates;
-            if switch_row(ui, p, t.update_auto, None, &mut on) {
+            let (flipped, label) = switch_row_full(ui, p, t.update_auto, None, &mut on);
+            info_icon(ui, p, Pos2::new(label.right() + 16.0, label.center().y), "update-auto-help", t.update_auto_hint);
+            if flipped {
                 self.apply(|c| c.check_updates = on);
             }
-            hint(ui, p, t.update_auto_hint);
-            ui.add_space(4.0);
             divider(ui, p);
             let mut on = self.cfg.auto_update;
-            if switch_row(ui, p, t.auto_update, None, &mut on) {
+            let (flipped, label) = switch_row_full(ui, p, t.auto_update, None, &mut on);
+            info_icon(ui, p, Pos2::new(label.right() + 16.0, label.center().y), "auto-update-help", t.auto_update_hint);
+            if flipped {
                 self.apply(|c| c.auto_update = on);
             }
-            hint(ui, p, t.auto_update_hint);
-            ui.add_space(10.0);
+            ui.add_space(4.0);
         });
     }
 
     /// The developer's address, with a ready-made mail and a GitHub link.
     fn report_section(&mut self, ui: &mut Ui, t: &Texts, p: Palette) {
         let copied = self.copied_at.is_some_and(|at| at.elapsed() < Duration::from_secs(2));
-        section(ui, p, t.section_report, |ui| {
+        section_with(ui, p, t.section_report, Some(t.report_desc), None, |ui| {
             ui.add_space(10.0);
-            ui.label(RichText::new(t.report_desc).size(12.5).color(p.muted));
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(update::REPORT_EMAIL).font(bold(14.0)).color(p.text));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if button(ui, p, t.report_log, ButtonKind::Plain).clicked() {
-                        update::reveal(&crate::log_path());
-                    }
-                });
-            });
+            ui.label(RichText::new(update::REPORT_EMAIL).font(bold(14.0)).color(p.text));
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
@@ -1564,6 +1665,119 @@ impl SettingsApp {
             });
             ui.add_space(12.0);
         });
+    }
+
+    /// Saving the settings to a file, loading one, and the folder they are in.
+    fn backup_section(&mut self, ui: &mut Ui, t: &Texts, p: Palette) {
+        let note = self.backup_note.clone().map(|(text, ok)| (text, if ok { p.green } else { p.red }));
+        let note = note.as_ref().map(|(text, color)| (text.as_str(), *color));
+        section_with(ui, p, t.section_backup, Some(t.backup_hint), note, |ui| {
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                if button(ui, p, t.backup_save, ButtonKind::Plain).clicked() {
+                    let current = Config::load_or_create().unwrap_or_else(|_| self.cfg.clone());
+                    self.backup_note = Some(match backup::export(&current) {
+                        Ok(path) => (format!("{}: {}", t.backup_saved, file_name(&path)), true),
+                        Err(e) => (format!("{e:#}"), false),
+                    });
+                }
+                if button(ui, p, t.backup_load, ButtonKind::Plain).clicked() {
+                    self.stop_recording();
+                    self.backup_picker = Some(BackupPicker { files: backup::list(), chosen: None, error: None, listed: Instant::now() });
+                }
+                if button(ui, p, t.backup_folder, ButtonKind::Plain).clicked() {
+                    backup::open_folder();
+                }
+            });
+            ui.add_space(12.0);
+        });
+    }
+
+    /// "Load settings…": the saved files to choose from, then Load to confirm.
+    fn backup_window(&mut self, ctx: &egui::Context, t: &Texts, p: Palette) {
+        let Some(mut picker) = self.backup_picker.take() else { return };
+        // Files copied into the folder meanwhile show up; the one chosen stays chosen.
+        if picker.listed.elapsed() >= REFRESH {
+            picker.listed = Instant::now();
+            let chosen = picker.chosen.map(|i| picker.files[i].path.clone());
+            picker.files = backup::list();
+            picker.chosen = chosen.and_then(|c| picker.files.iter().position(|f| f.path == c));
+        }
+        let (mut close, mut load) = (false, None);
+        let frame = egui::Frame::new()
+            .fill(p.bg)
+            .stroke(Stroke::new(1.0, p.border))
+            .corner_radius(14)
+            .inner_margin(Margin::same(18))
+            .shadow(ctx.global_style().visuals.window_shadow);
+        let response = egui::Modal::new(egui::Id::unique("backup-picker")).frame(frame).show(ctx, |ui| {
+            ui.set_width(480.0);
+            ui.spacing_mut().item_spacing.y = 0.0;
+            ui.label(RichText::new(t.backup_load.trim_end_matches('…')).font(bold(16.0)).color(p.text));
+            ui.add_space(2.0);
+            hint(ui, p, &home_relative(&backup::folder()));
+            ui.add_space(10.0);
+            if picker.files.is_empty() {
+                card(ui, p, |ui| empty(ui, p, t.backup_none));
+            } else {
+                card(ui, p, |ui| {
+                    egui::ScrollArea::vertical().max_height(280.0).show(ui, |ui| {
+                        for (i, file) in picker.files.iter().enumerate() {
+                            if i > 0 {
+                                divider(ui, p);
+                            }
+                            let when = file.modified.map(|m| backup::format_time(m, false));
+                            let row = Row { title: &file.name, subtitle: when.as_deref(), badge: None };
+                            if choice_row(ui, p, Mark::Radio, picker.chosen == Some(i), &row).clicked() {
+                                picker.chosen = Some(i);
+                                picker.error = None;
+                            }
+                        }
+                    });
+                });
+                ui.add_space(6.0);
+                hint(ui, p, if picker.chosen.is_some() { t.backup_confirm } else { t.backup_pick });
+            }
+            if let Some(err) = &picker.error {
+                ui.add_space(6.0);
+                ui.label(RichText::new(err).size(12.5).color(p.red));
+            }
+            ui.add_space(14.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                if button(ui, p, t.backup_folder, ButtonKind::Plain).clicked() {
+                    backup::open_folder();
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if picker.chosen.is_some() && button(ui, p, t.backup_apply, ButtonKind::Primary).clicked() {
+                        load = picker.chosen;
+                    }
+                    close |= button(ui, p, t.cancel, ButtonKind::Plain).clicked();
+                });
+            });
+        });
+        close |= response.should_close();
+        if let Some(i) = load {
+            let file = picker.files[i].clone();
+            match backup::read(&file.path) {
+                Ok(cfg) => {
+                    self.apply(|c| *c = cfg);
+                    match self.error.take() {
+                        None => {
+                            log::info!("settings loaded from {}", file.path.display());
+                            self.backup_note = Some((format!("{}: {}", t.backup_loaded, file.name), true));
+                            return;
+                        }
+                        Some(e) => picker.error = Some(e),
+                    }
+                }
+                Err(e) => picker.error = Some(format!("{}: {e:#}", t.backup_bad)),
+            }
+        }
+        if !close {
+            self.backup_picker = Some(picker);
+        }
     }
 
     /// Asks the running tray app to uninstall (it owns the button), or does it here
@@ -1616,6 +1830,19 @@ impl SettingsApp {
     }
 }
 
+/// "flockswitch-settings-….toml" of a path.
+fn file_name(path: &std::path::Path) -> String {
+    path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned())
+}
+
+/// A path under the home folder as "~/…".
+fn home_relative(path: &std::path::Path) -> String {
+    match dirs::home_dir().and_then(|h| path.strip_prefix(h).ok().map(std::path::Path::to_path_buf)) {
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
+    }
+}
+
 fn device_subtitle(d: &DeviceInfo, t: &Texts) -> String {
     let kind = match d.kind.as_str() {
         "mouse" => t.kind_mouse,
@@ -1660,10 +1887,26 @@ fn color_swatch(ui: &mut Ui, p: Palette, [r, g, b]: [u8; 3], selected: bool) -> 
 
 /// A titled card: the title sits above a rounded panel, as in the system settings.
 fn section(ui: &mut Ui, p: Palette, title: &str, add: impl FnOnce(&mut Ui)) {
-    ui.add_space(12.0);
+    section_with(ui, p, title, None, None, add);
+}
+
+/// `section` with an "i" after the title explaining `info`, and a short `note` in its
+/// colour at the right end of the title line.
+fn section_with(ui: &mut Ui, p: Palette, title: &str, info: Option<&str>, note: Option<(&str, Color32)>, add: impl FnOnce(&mut Ui)) {
+    ui.add_space(10.0);
     ui.horizontal(|ui| {
         ui.add_space(4.0);
-        ui.label(RichText::new(title).font(bold(13.0)).color(p.muted));
+        let label = ui.label(RichText::new(title).font(bold(13.0)).color(p.muted));
+        if let Some(text) = info {
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(20.0, label.rect.height()), Sense::hover());
+            info_icon(ui, p, rect.center(), title, text);
+        }
+        if let Some((text, color)) = note {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(4.0);
+                ui.add(egui::Label::new(RichText::new(text).size(12.0).color(color)).truncate());
+            });
+        }
     });
     ui.add_space(2.0);
     card(ui, p, add);
@@ -1684,17 +1927,22 @@ fn card(ui: &mut Ui, p: Palette, add: impl FnOnce(&mut Ui)) {
 
 /// What the app expects before it is set up: Logi Options+ with the buttons on "No action".
 fn notice(ui: &mut Ui, p: Palette, t: &Texts) {
-    ui.add_space(12.0);
+    ui.add_space(10.0);
     egui::Frame::new()
         .fill(p.accent.gamma_multiply(0.10))
         .stroke(Stroke::new(1.0, p.accent.gamma_multiply(0.45)))
         .corner_radius(12)
-        .inner_margin(Margin::symmetric(16, 12))
+        .inner_margin(Margin::symmetric(16, 10))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.spacing_mut().item_spacing.y = 4.0;
             ui.label(RichText::new(format!("ⓘ  {}", t.notice_title)).font(bold(14.0)).color(p.accent));
-            ui.label(RichText::new(t.notice).size(12.5).color(p.text));
+            for (i, paragraph) in t.notice.split("\n\n").enumerate() {
+                if i > 0 {
+                    ui.add_space(4.0);
+                }
+                ui.label(RichText::new(paragraph).size(12.5).color(p.text));
+            }
         });
 }
 
@@ -1748,6 +1996,11 @@ fn title_row(ui: &mut Ui, p: Palette, label: &str, note: Option<&str>) {
 /// A row with a label and an on/off switch on the right. Returns true when flipped.
 /// A `note` shows in smaller text under the label.
 fn switch_row(ui: &mut Ui, p: Palette, label: &str, note: Option<&str>, on: &mut bool) -> bool {
+    switch_row_full(ui, p, label, note, on).0
+}
+
+/// `switch_row`, also giving where its label was drawn (to put something after it).
+fn switch_row_full(ui: &mut Ui, p: Palette, label: &str, note: Option<&str>, on: &mut bool) -> (bool, Rect) {
     let h = if note.is_some() { 50.0 } else { 40.0 };
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), h), Sense::click());
     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -1757,25 +2010,40 @@ fn switch_row(ui: &mut Ui, p: Palette, label: &str, note: Option<&str>, on: &mut
     }
     let painter = ui.painter();
     let left = Pos2::new(rect.left(), rect.center().y);
-    match note {
+    let label_rect = match note {
         Some(note) => {
-            painter.text(left - Vec2::new(0.0, 1.0), Align2::LEFT_BOTTOM, label, FontId::proportional(14.5), p.text);
             painter.text(left + Vec2::new(0.0, 3.0), Align2::LEFT_TOP, note, FontId::proportional(12.5), p.amber);
+            painter.text(left - Vec2::new(0.0, 1.0), Align2::LEFT_BOTTOM, label, FontId::proportional(14.5), p.text)
         }
-        None => {
-            painter.text(left, Align2::LEFT_CENTER, label, FontId::proportional(14.5), p.text);
-        }
-    }
+        None => painter.text(left, Align2::LEFT_CENTER, label, FontId::proportional(14.5), p.text),
+    };
 
     let how_on = ui.ctx().animate_bool_responsive(resp.id, *on);
     let track = Rect::from_center_size(Pos2::new(rect.right() - 20.0, rect.center().y), Vec2::new(40.0, 24.0));
     painter.rect_filled(track, 12, p.track.lerp_to_gamma(p.accent, how_on));
     let x = egui::lerp(track.left() + 12.0..=track.right() - 12.0, how_on);
     painter.circle_filled(Pos2::new(x, track.center().y), 9.5, Color32::WHITE);
-    resp.clicked()
+    (resp.clicked(), label_rect)
 }
 
-const ROW_NORMAL: f32 = 52.0;
+/// A small round "i" centred at `center` that explains `text` while hovered. It takes
+/// clicks too, so clicking it does not flip the row it sits on.
+fn info_icon(ui: &mut Ui, p: Palette, center: Pos2, id: &str, text: &str) {
+    let rect = Rect::from_center_size(center, Vec2::splat(20.0));
+    let resp = ui.interact(rect, egui::Id::unique(("info-icon", id)), Sense::click());
+    resp.widget_info(|| WidgetInfo::labeled(Role::Button, true, text));
+    let color = if resp.hovered() { p.accent } else { p.muted };
+    let painter = ui.painter();
+    painter.circle_stroke(center, 8.0, Stroke::new(1.3, color));
+    painter.circle_filled(center + Vec2::new(0.0, -3.7), 1.25, color);
+    painter.line_segment([center + Vec2::new(0.0, -1.2), center + Vec2::new(0.0, 4.3)], Stroke::new(1.7, color));
+    resp.on_hover_ui(|ui| {
+        ui.set_max_width(400.0);
+        ui.spacing_mut().item_spacing.y = 4.0;
+        ui.label(RichText::new(text).size(12.5).color(p.text));
+    });
+}
+
 const ROW_SMALL: f32 = 42.0;
 
 /// A row `height` tall with a bold label on the left and a control `width` wide on the

@@ -552,7 +552,7 @@ pub fn report_body(cfg: &crate::config::Config, devices: &[crate::shared::Device
     s
 }
 
-fn os_version() -> String {
+pub fn os_version() -> String {
     #[cfg(target_os = "macos")]
     if let Ok(out) = Command::new("sw_vers").arg("-productVersion").output() {
         return format!("macOS {}", String::from_utf8_lossy(&out.stdout).trim());

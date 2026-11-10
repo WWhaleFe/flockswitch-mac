@@ -330,6 +330,48 @@ impl LocateStyle {
     }
 }
 
+/// A key that must be held while the mouse is shaken for the shake to count. Written
+/// as in the Windows and Linux settings (none, ctrl, alt, shift), plus cmd here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ShakeKey {
+    #[default]
+    None,
+    Ctrl,
+    Alt,
+    Shift,
+    Cmd,
+}
+
+pub const SHAKE_KEYS: [ShakeKey; 5] = [ShakeKey::None, ShakeKey::Ctrl, ShakeKey::Alt, ShakeKey::Shift, ShakeKey::Cmd];
+
+impl ShakeKey {
+    /// Reads a key name; the other names a settings file from another computer may use
+    /// (control, option, command, win, super, meta) mean the same keys.
+    pub fn from_name(name: &str) -> Option<ShakeKey> {
+        Some(match name.trim().to_lowercase().as_str() {
+            "" | "none" | "off" => ShakeKey::None,
+            "ctrl" | "control" => ShakeKey::Ctrl,
+            "alt" | "option" | "opt" => ShakeKey::Alt,
+            "shift" => ShakeKey::Shift,
+            "cmd" | "command" | "super" | "win" | "meta" => ShakeKey::Cmd,
+            _ => return None,
+        })
+    }
+}
+
+/// A name this version does not know (from a newer version or another computer) is
+/// read as no key, rather than making the whole settings file unreadable.
+impl<'de> Deserialize<'de> for ShakeKey {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<ShakeKey, D::Error> {
+        let name = String::deserialize(d)?;
+        Ok(ShakeKey::from_name(&name).unwrap_or_default())
+    }
+}
+
+/// How long the shaking must go on, as the settings window offers it (ms).
+pub const SHAKE_TIMES: [u64; 4] = [500, 1000, 1500, 2000];
+
 /// Showing where the cursor is with a short highlight around it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -343,6 +385,10 @@ pub struct Locate {
     pub on_arrival: bool,
     /// Shown when the mouse is shaken from side to side.
     pub on_shake: bool,
+    /// How long (ms) the shaking must go on before it counts.
+    pub shake_time_ms: u64,
+    /// A key that must be held while shaking; none = any shake counts.
+    pub shake_key: ShakeKey,
     pub style: LocateStyle,
     /// "#RRGGBB".
     pub color: String,
@@ -358,6 +404,8 @@ impl Default for Locate {
             hotkey: "ctrl+alt+l".into(),
             on_arrival: true,
             on_shake: false,
+            shake_time_ms: 1000,
+            shake_key: ShakeKey::None,
             style: LocateStyle::default(),
             color: DEFAULT_EFFECT_COLOR.into(),
             size: 100,
@@ -798,11 +846,20 @@ impl Config {
                 "on" => self.locate.on = flag()?,
                 "arrival" => self.locate.on_arrival = flag()?,
                 "shake" => self.locate.on_shake = flag()?,
+                "shake_time" | "shake_time_ms" => {
+                    let v = value.trim().trim_end_matches("ms").trim();
+                    self.locate.shake_time_ms = v.parse().context("locate.shake_time must be milliseconds, e.g. 1000")?;
+                }
+                "shake_key" => {
+                    self.locate.shake_key =
+                        ShakeKey::from_name(value).context("locate.shake_key must be none, ctrl, alt, shift or cmd")?;
+                }
                 "shortcut" => self.locate.on_hotkey = flag()?,
                 "color" => self.locate.color = value.trim().to_uppercase(),
                 "size" => self.locate.size = percent(value).context("locate.size must be a percentage, e.g. 125")?,
                 "hotkey" => {
                     let value = if value.eq_ignore_ascii_case("none") { "" } else { value };
+                    anyhow::ensure!(!crate::hotkey::reserved(value), "'{value}' is a combination macOS keeps for itself");
                     self.locate.hotkey = value.trim().to_lowercase();
                 }
                 "style" => {
@@ -814,7 +871,7 @@ impl Config {
                         _ => anyhow::bail!("locate.style must be ring, radar, spotlight or random"),
                     };
                 }
-                _ => anyhow::bail!("unknown setting '{key}' (locate, locate.style, locate.color, locate.size, locate.hotkey, locate.shortcut, locate.arrival, locate.shake)"),
+                _ => anyhow::bail!("unknown setting '{key}' (locate, locate.style, locate.color, locate.size, locate.hotkey, locate.shortcut, locate.arrival, locate.shake, locate.shake_time, locate.shake_key)"),
             }
             return Ok(());
         }
@@ -858,6 +915,7 @@ impl Config {
         if let Some(n) = key.strip_prefix("hotkey.") {
             let channel = n.parse::<u8>().ok().filter(|c| (1..=3).contains(c)).context("use hotkey.1, hotkey.2 or hotkey.3")?;
             let value = if value.eq_ignore_ascii_case("none") { "" } else { value };
+            anyhow::ensure!(!crate::hotkey::reserved(value), "'{value}' is a combination macOS keeps for itself");
             self.hotkeys.set_key(channel, value);
             return Ok(());
         }
@@ -926,6 +984,7 @@ impl Config {
         }
         anyhow::ensure!((100..=5000).contains(&self.edges.dwell_ms), "edge.dwell must be between 100 and 5000 ms");
         anyhow::ensure!(self.edges.corner_margin <= 1000, "edge.corner must be at most 1000 pixels");
+        anyhow::ensure!((200..=5000).contains(&self.locate.shake_time_ms), "locate.shake_time must be between 200 and 5000 ms");
         anyhow::ensure!(parse_color(&self.edges.anim_color).is_some(), "edge.anim_color must be a colour like #FFCC00");
         anyhow::ensure!(parse_color(&self.locate.color).is_some(), "locate.color must be a colour like #FFCC00");
         for (key, size) in [("edge.anim_size", self.edges.anim_size), ("locate.size", self.locate.size)] {
@@ -1308,9 +1367,30 @@ mod tests {
         assert!(c.set("locate.bogus", "1").is_err());
         c.set("locate.hotkey", "none").unwrap();
         assert_eq!(c.locate.hotkey, "");
+        assert!(c.set("locate.hotkey", "cmd+q").is_err(), "macOS keeps it");
+        assert!(c.set("hotkey.2", "super+w").is_err(), "macOS keeps it");
+        // How long the shake must last, and the key held while shaking.
+        assert_eq!((c.locate.shake_time_ms, c.locate.shake_key), (1000, ShakeKey::None));
+        c.set("locate.shake_time", "1500").unwrap();
+        c.set("locate.shake_key", "ctrl").unwrap();
+        assert_eq!((c.locate.shake_time_ms, c.locate.shake_key), (1500, ShakeKey::Ctrl));
+        c.set("locate.shake_key", "Command").unwrap();
+        assert_eq!(c.locate.shake_key, ShakeKey::Cmd);
+        assert!(c.set("locate.shake_time", "50").is_err());
+        assert!(c.set("locate.shake_time", "soon").is_err());
+        assert!(c.set("locate.shake_key", "fn").is_err());
+        assert!(toml::to_string_pretty(&c).unwrap().contains("shake_key = \"cmd\""));
         let back = Config::parse(&toml::to_string_pretty(&c).unwrap()).unwrap();
         assert_eq!(back.locate, c.locate);
         assert_eq!(Config::parse("enabled = true").unwrap().locate, Locate::default());
+        // Older settings have no shake time or key: a second, no key.
+        let old = Config::parse("[locate]\non = true\non_shake = true\n").unwrap();
+        assert_eq!((old.locate.shake_time_ms, old.locate.shake_key), (1000, ShakeKey::None));
+        // Key names written by the other ports, and ones this version does not know.
+        for (name, key) in [("alt", ShakeKey::Alt), ("shift", ShakeKey::Shift), ("win", ShakeKey::Cmd), ("hyper", ShakeKey::None)] {
+            let c = Config::parse(&format!("[locate]\nshake_key = \"{name}\"\n")).unwrap();
+            assert_eq!(c.locate.shake_key, key, "{name}");
+        }
     }
 
     #[test]

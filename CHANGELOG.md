@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.11.0 — 2026-11-10
+
+- Settings backup (Settings → General): **Save settings** writes the settings to `~/Documents/flockswitch/flockswitch-settings-<computer>-<YYYYMMDD-HHMMSS>.toml`, **Load settings…** lists the files there, newest first, and after a confirmation applies the chosen one, and **Open folder** shows the folder in Finder. The file is the same on macOS, Windows and Linux; settings another computer has and this one does not are skipped, and a file that is not a flockswitch settings file is refused. Channels differ from computer to computer, so check them after loading on another one
+- Find the cursor by shaking: it no longer reacts so easily. The mouse must be shaken without a pause for the time chosen (**0.5 / 1 / 1.5 / 2 s**, `set locate.shake_time 1000`), and it can be made to count only while a key is held (**None / ⌃ Control / ⌥ Option / ⇧ Shift / ⌘ Command**, `set locate.shake_key ctrl`). Older settings get 1 s and no key
+- Keyboard shortcuts: an ⓘ next to the shortcut settings explains which combinations work on macOS and which do not. Combinations macOS uses itself (⌘Q, ⌘W, ⌘H, ⌘M, ⌘⇧3/4/5, ⌃⌘Q and the like) are now refused
+- Updates: **Check now** only looks, in the settings window and in the ⇄ menu; a new version is then offered as **Update now**, which installs it in the background whatever **Install updates automatically** says (that setting is for the daily check)
+- The settings window and the haptics window keep their size in points when moved between displays with different scaling (macOS already did; this is a guard)
+- Settings → General is tidier and fits the window: the update and report explanations moved into ⓘ tips, and **Show log** is gone (the log is still written)
+
 ## 0.10.0 — 2026-11-10
 
 - Automatic updates: when flockswitch finds a new version it downloads it, checks it against the release's SHA256SUMS.txt, puts it in place of the app and restarts into it. **Install updates automatically** in Settings → General (on by default, `set auto_update true|false`); when off, **Update now** in the settings window or the ⇄ menu installs it. If the app cannot be replaced where it is (for example a folder it may not write to), Update now saves the new version to Downloads as before. This first works for the version after 0.10.0; 0.10.0 itself is installed the old way

@@ -19,6 +19,36 @@ pub fn parse(text: &str) -> Result<HotKey> {
     text.parse::<HotKey>().map_err(|e| anyhow!("shortcut '{text}': {e}"))
 }
 
+/// Combinations macOS itself or every app uses (quit, close, hide, minimize, screenshots,
+/// lock screen, full screen, Dock). Registered as a hot key they would take that away
+/// everywhere, so they are not accepted. (⌘Tab, ⌘Space and the like are not offered at
+/// all: only numbers, letters and F keys are.)
+const RESERVED: [&str; 17] = [
+    "super+q",
+    "super+w",
+    "super+h",
+    "alt+super+h",
+    "super+m",
+    "alt+super+m",
+    "shift+super+q",
+    "alt+shift+super+q",
+    "ctrl+super+q",
+    "ctrl+super+f",
+    "alt+super+d",
+    "shift+super+3",
+    "shift+super+4",
+    "shift+super+5",
+    "shift+super+6",
+    "ctrl+shift+super+3",
+    "ctrl+shift+super+4",
+];
+
+/// Whether a shortcut is one macOS keeps for itself (see RESERVED).
+pub fn reserved(text: &str) -> bool {
+    let Ok(hk) = parse(text) else { return false };
+    cfg!(target_os = "macos") && RESERVED.iter().any(|r| parse(r).is_ok_and(|x| x == hk))
+}
+
 /// How a shortcut is shown: ⌃⌥1 on macOS, Ctrl+Alt+1 on Windows.
 pub fn display(text: &str) -> String {
     let parts: Vec<&str> = text.split('+').map(str::trim).collect();
@@ -140,6 +170,11 @@ mod tests {
         assert!(parse("ctrl+alt+1").is_ok());
         assert!(parse("ctrl+alt+f5").is_ok());
         assert!(parse("ctrl+alt+").is_err());
+        assert!(RESERVED.iter().all(|r| parse(r).is_ok()));
+        if cfg!(target_os = "macos") {
+            assert!(reserved("super+q") && reserved("Super+Shift+4") && reserved("ctrl+super+q"));
+        }
+        assert!(!reserved("ctrl+alt+q") && !reserved("super+shift+k") && !reserved("f5"));
         let shown = display("ctrl+alt+shift+k");
         if cfg!(target_os = "macos") {
             assert_eq!(shown, "⌃⌥⇧K");

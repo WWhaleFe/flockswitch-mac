@@ -306,9 +306,13 @@ impl Ui {
                 }
             }
             Action::Settings => open_settings_window(),
+            // Asked for: only look. A new version is then offered as "Update now";
+            // automatic install is for the periodic check.
             Action::CheckUpdate => {
                 let shared = self.shared.clone();
-                std::thread::spawn(move || check_and_install(&shared));
+                std::thread::spawn(move || {
+                    crate::update::check_into(&shared);
+                });
             }
             // Asked for: an app that cannot replace itself gets the file in Downloads.
             Action::InstallUpdate => match self.shared.status().update {
@@ -340,9 +344,9 @@ impl Ui {
     }
 }
 
-/// Looks for a new version and, with automatic install on, installs it (once: a failed
-/// install waits for the next check). An app that cannot replace itself where it is
-/// just shows the new version, without opening Downloads unasked.
+/// The periodic check: looks for a new version and, with automatic install on, installs
+/// it (once: a failed install waits for the next check). An app that cannot replace
+/// itself where it is just shows the new version, without opening Downloads unasked.
 fn check_and_install(shared: &Shared) {
     if let crate::update::UpdateState::Available(r) = crate::update::check_into(shared) {
         if shared.config().auto_update {
