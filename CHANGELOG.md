@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.11.1 — 2026-11-10
+
+- More room between rows and the lines between them. Rows with a segment bar or buttons on the right (size, language, shortcut) sat almost on the line below, because the control pulled the row's height in; now the space above and below is even
+- The settings window opens 960 tall to fit the extra room, so the General tab still fits without scrolling
+
 ## 0.11.0 — 2026-11-10
 
 - Settings backup (Settings → General): **Save settings** writes the settings to `~/Documents/flockswitch/flockswitch-settings-<computer>-<YYYYMMDD-HHMMSS>.toml`, **Load settings…** lists the files there, newest first, and after a confirmation applies the chosen one, and **Open folder** shows the folder in Finder. The file is the same on macOS, Windows and Linux; settings another computer has and this one does not are skipped, and a file that is not a flockswitch settings file is refused. Channels differ from computer to computer, so check them after loading on another one
