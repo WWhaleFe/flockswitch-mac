@@ -234,7 +234,7 @@ pub enum EdgeAnimStyle {
     Vortex,
     Scan,
     Liquid,
-    /// A different effect each time; see `resolved`. Has no drawing function of its own.
+    /// A different effect each time; see `Edges::countdown`. Has no drawing function of its own.
     Random,
 }
 
@@ -274,16 +274,13 @@ impl EdgeAnimStyle {
         }
     }
 
-    fn from_name(name: &str) -> Option<EdgeAnimStyle> {
+    pub fn from_name(name: &str) -> Option<EdgeAnimStyle> {
         EDGE_ANIM_STYLES.into_iter().find(|s| s.name() == name.trim().to_lowercase())
     }
 
-    /// The effect to draw now: for Random one of the others (never None).
-    pub fn resolved(self) -> EdgeAnimStyle {
-        match self {
-            EdgeAnimStyle::Random => EDGE_ANIM_STYLES[1 + random_below(EDGE_ANIM_STYLES.len() - 2)],
-            style => style,
-        }
+    /// Where the effect's own settings are in `Edges::effects`; None and Random have none.
+    fn effect_index(self) -> Option<usize> {
+        EDGE_EFFECTS.iter().position(|&s| s == self)
     }
 
     /// Whether the effect drains in a direction the user can choose.
@@ -297,6 +294,19 @@ impl EdgeAnimStyle {
     }
 }
 
+/// The effects that draw something, each with its own settings (`EdgeEffect`), in the
+/// order of `EDGE_ANIM_STYLES`.
+pub const EDGE_EFFECTS: [EdgeAnimStyle; 8] = [
+    EdgeAnimStyle::Ring,
+    EdgeAnimStyle::Semicircle,
+    EdgeAnimStyle::Bar,
+    EdgeAnimStyle::Pulse,
+    EdgeAnimStyle::Laser,
+    EdgeAnimStyle::Vortex,
+    EdgeAnimStyle::Scan,
+    EdgeAnimStyle::Liquid,
+];
+
 /// Which way the ring, semicircle or bar drains. Numbered as in overlay_macos.m.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -305,6 +315,64 @@ pub enum EdgeAnimDirection {
     Clockwise,
     CounterClockwise,
     Both,
+}
+
+pub const EDGE_ANIM_DIRECTIONS: [EdgeAnimDirection; 3] =
+    [EdgeAnimDirection::Clockwise, EdgeAnimDirection::CounterClockwise, EdgeAnimDirection::Both];
+
+impl EdgeAnimDirection {
+    /// Name in the settings file and on the command line.
+    pub fn name(self) -> &'static str {
+        match self {
+            EdgeAnimDirection::Clockwise => "clockwise",
+            EdgeAnimDirection::CounterClockwise => "counterclockwise",
+            EdgeAnimDirection::Both => "both",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<EdgeAnimDirection> {
+        EDGE_ANIM_DIRECTIONS.into_iter().find(|d| d.name() == name.trim().to_lowercase())
+    }
+}
+
+/// How one countdown effect looks: each effect has its own. `direction` counts only for
+/// effects with `has_direction`, `shrink` only for those that `can_shrink`; for the
+/// others they stay at their defaults and are not written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EdgeEffect {
+    /// "#RRGGBB".
+    pub color: String,
+    /// Size in percent.
+    pub size: u16,
+    pub direction: EdgeAnimDirection,
+    /// The ring or semicircle shrinks away instead of draining.
+    pub shrink: bool,
+}
+
+impl Default for EdgeEffect {
+    fn default() -> Self {
+        EdgeEffect { color: DEFAULT_EFFECT_COLOR.into(), size: 100, direction: EdgeAnimDirection::default(), shrink: false }
+    }
+}
+
+impl EdgeEffect {
+    /// Leaves `direction` and `shrink` at their defaults where `style` has no use for them.
+    fn fitted_to(mut self, style: EdgeAnimStyle) -> EdgeEffect {
+        if !style.has_direction() {
+            self.direction = EdgeAnimDirection::default();
+        }
+        if !style.can_shrink() {
+            self.shrink = false;
+        }
+        self
+    }
+}
+
+/// One countdown about to be drawn: the effect and how it looks this time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Countdown {
+    pub style: EdgeAnimStyle,
+    pub effect: EdgeEffect,
 }
 
 /// How the cursor is shown. The number of each variant indexes the table of drawing
@@ -415,8 +483,14 @@ impl Default for Locate {
 
 /// Switching at the screen edge: rest the cursor against an outer edge of the desktop
 /// and the group goes to that edge's channel. Each computer watches its own screen.
+///
+/// In the file each effect has a table of its own (`[edges.effects.ring]` with color,
+/// size, and direction / shrink where the effect has them; the same in every port).
+/// Before 0.12.0 one `anim_color` / `anim_size` / `anim_direction` / `anim_shrink`
+/// served every effect: an effect missing from the file takes those, and they are still
+/// written, set as the chosen effect's, for older versions reading the file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(from = "EdgesIn", into = "EdgesOut")]
 pub struct Edges {
     pub on: bool,
     /// How long (ms) the cursor must rest against the edge first.
@@ -434,13 +508,8 @@ pub struct Edges {
     pub require_control: bool,
     /// What is drawn while the cursor waits.
     pub anim_style: EdgeAnimStyle,
-    pub anim_direction: EdgeAnimDirection,
-    /// The ring or semicircle shrinks away instead of draining.
-    pub anim_shrink: bool,
-    /// "#RRGGBB".
-    pub anim_color: String,
-    /// Size of the countdown in percent.
-    pub anim_size: u16,
+    /// Each effect's own look, in the order of `EDGE_EFFECTS`.
+    pub effects: [EdgeEffect; 8],
 }
 
 impl Default for Edges {
@@ -456,10 +525,168 @@ impl Default for Edges {
             place_cursor: true,
             require_control: false,
             anim_style: EdgeAnimStyle::default(),
-            anim_direction: EdgeAnimDirection::default(),
-            anim_shrink: false,
-            anim_color: DEFAULT_EFFECT_COLOR.into(),
-            anim_size: 100,
+            effects: Default::default(),
+        }
+    }
+}
+
+/// `Edges` as read from the file: the effects' tables as they are, and the settings of
+/// before 0.12.0 that fill in what they lack.
+#[derive(Deserialize)]
+#[serde(default)]
+struct EdgesIn {
+    on: bool,
+    dwell_ms: u64,
+    left: u8,
+    right: u8,
+    top: u8,
+    bottom: u8,
+    corner_margin: u32,
+    place_cursor: bool,
+    require_control: bool,
+    anim_style: EdgeAnimStyle,
+    anim_direction: EdgeAnimDirection,
+    anim_shrink: bool,
+    anim_color: String,
+    anim_size: u16,
+    effects: toml::Table,
+}
+
+impl Default for EdgesIn {
+    fn default() -> Self {
+        let e = Edges::default();
+        let legacy = EdgeEffect::default();
+        EdgesIn {
+            on: e.on,
+            dwell_ms: e.dwell_ms,
+            left: e.left,
+            right: e.right,
+            top: e.top,
+            bottom: e.bottom,
+            corner_margin: e.corner_margin,
+            place_cursor: e.place_cursor,
+            require_control: e.require_control,
+            anim_style: e.anim_style,
+            anim_direction: legacy.direction,
+            anim_shrink: legacy.shrink,
+            anim_color: legacy.color,
+            anim_size: legacy.size,
+            effects: toml::Table::new(),
+        }
+    }
+}
+
+/// Reads one effect's table: each field that is there and makes sense replaces the one
+/// of `base`; unknown fields, and values of the wrong kind or out of range, are passed
+/// over.
+fn read_effect(table: Option<&toml::Value>, mut base: EdgeEffect, style: EdgeAnimStyle) -> EdgeEffect {
+    if let Some(t) = table.and_then(toml::Value::as_table) {
+        if let Some(color) = t.get("color").and_then(toml::Value::as_str).filter(|c| parse_color(c).is_some()) {
+            base.color = color.trim().to_uppercase();
+        }
+        if let Some(size) = t.get("size").and_then(toml::Value::as_integer).filter(|s| (50..=200).contains(s)) {
+            base.size = size as u16;
+        }
+        if let Some(d) = t.get("direction").and_then(toml::Value::as_str).and_then(EdgeAnimDirection::from_name) {
+            base.direction = d;
+        }
+        if let Some(shrink) = t.get("shrink").and_then(toml::Value::as_bool) {
+            base.shrink = shrink;
+        }
+    }
+    base.fitted_to(style)
+}
+
+impl From<EdgesIn> for Edges {
+    fn from(f: EdgesIn) -> Edges {
+        let legacy = EdgeEffect { color: f.anim_color.trim().to_uppercase(), size: f.anim_size, direction: f.anim_direction, shrink: f.anim_shrink };
+        let effects = EDGE_EFFECTS.map(|style| read_effect(f.effects.get(style.name()), legacy.clone(), style));
+        Edges {
+            on: f.on,
+            dwell_ms: f.dwell_ms,
+            left: f.left,
+            right: f.right,
+            top: f.top,
+            bottom: f.bottom,
+            corner_margin: f.corner_margin,
+            place_cursor: f.place_cursor,
+            require_control: f.require_control,
+            anim_style: f.anim_style,
+            effects,
+        }
+    }
+}
+
+/// `Edges` as written to the file.
+#[derive(Serialize)]
+struct EdgesOut {
+    on: bool,
+    dwell_ms: u64,
+    left: u8,
+    right: u8,
+    top: u8,
+    bottom: u8,
+    corner_margin: u32,
+    place_cursor: bool,
+    require_control: bool,
+    anim_style: EdgeAnimStyle,
+    anim_direction: EdgeAnimDirection,
+    anim_shrink: bool,
+    anim_color: String,
+    anim_size: u16,
+    effects: EffectsOut,
+}
+
+/// The effects' tables, written in the order of `EDGE_EFFECTS`.
+struct EffectsOut([EdgeEffect; 8]);
+
+#[derive(Serialize)]
+struct EffectOut<'a> {
+    color: &'a str,
+    size: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    direction: Option<EdgeAnimDirection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    shrink: Option<bool>,
+}
+
+impl Serialize for EffectsOut {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = s.serialize_map(Some(EDGE_EFFECTS.len()))?;
+        for (style, e) in EDGE_EFFECTS.iter().zip(&self.0) {
+            let out = EffectOut {
+                color: &e.color,
+                size: e.size,
+                direction: style.has_direction().then_some(e.direction),
+                shrink: style.can_shrink().then_some(e.shrink),
+            };
+            map.serialize_entry(style.name(), &out)?;
+        }
+        map.end()
+    }
+}
+
+impl From<Edges> for EdgesOut {
+    fn from(e: Edges) -> EdgesOut {
+        // For older versions: the chosen effect's look (the ring's for none or random).
+        let shown = e.effect(e.anim_style).unwrap_or(&e.effects[0]).clone();
+        EdgesOut {
+            on: e.on,
+            dwell_ms: e.dwell_ms,
+            left: e.left,
+            right: e.right,
+            top: e.top,
+            bottom: e.bottom,
+            corner_margin: e.corner_margin,
+            place_cursor: e.place_cursor,
+            require_control: e.require_control,
+            anim_style: e.anim_style,
+            anim_direction: shown.direction,
+            anim_shrink: shown.shrink,
+            anim_color: shown.color,
+            anim_size: shown.size,
+            effects: EffectsOut(e.effects),
         }
     }
 }
@@ -491,6 +718,50 @@ impl Edges {
     /// Whether any edge has a channel.
     pub fn any(&self) -> bool {
         EDGES.into_iter().any(|e| self.channel(e) != 0)
+    }
+
+    /// The own settings of an effect; None for none and random.
+    pub fn effect(&self, style: EdgeAnimStyle) -> Option<&EdgeEffect> {
+        style.effect_index().map(|i| &self.effects[i])
+    }
+
+    pub fn effect_mut(&mut self, style: EdgeAnimStyle) -> Option<&mut EdgeEffect> {
+        style.effect_index().map(|i| &mut self.effects[i])
+    }
+
+    /// What to draw for the next wait; None when no countdown is chosen.
+    pub fn countdown(&self) -> Option<Countdown> {
+        self.countdown_with(&mut random_below)
+    }
+
+    /// `countdown`, with `below(n)` giving a number below n. Random takes one of the
+    /// effects in its own colour and size, and a random direction and shrink-away where
+    /// that effect has them.
+    pub fn countdown_with(&self, below: &mut impl FnMut(usize) -> usize) -> Option<Countdown> {
+        match self.anim_style {
+            EdgeAnimStyle::None => None,
+            EdgeAnimStyle::Random => {
+                let style = EDGE_EFFECTS[below(EDGE_EFFECTS.len()) % EDGE_EFFECTS.len()];
+                let mut effect = self.effect(style)?.clone();
+                if style.has_direction() {
+                    effect.direction = EDGE_ANIM_DIRECTIONS[below(EDGE_ANIM_DIRECTIONS.len()) % EDGE_ANIM_DIRECTIONS.len()];
+                }
+                if style.can_shrink() {
+                    effect.shrink = below(2) % 2 == 1;
+                }
+                Some(Countdown { style, effect })
+            }
+            style => Some(Countdown { style, effect: self.effect(style)?.clone() }),
+        }
+    }
+
+    /// The effects a setting without an effect's name (`edge.anim_color` and the like)
+    /// changes: the chosen one, or all of them when none or random is chosen.
+    fn targets(&self) -> Vec<EdgeAnimStyle> {
+        match self.anim_style.effect_index() {
+            Some(_) => vec![self.anim_style],
+            None => EDGE_EFFECTS.to_vec(),
+        }
     }
 }
 
@@ -889,17 +1160,37 @@ impl Config {
                     self.edges.anim_style = EdgeAnimStyle::from_name(value)
                         .context("edge.anim must be none, ring, semicircle, bar, pulse, laser, vortex, scan, liquid or random")?;
                 }
-                "anim_direction" => {
-                    self.edges.anim_direction = match value.trim().to_lowercase().as_str() {
-                        "clockwise" => EdgeAnimDirection::Clockwise,
-                        "counterclockwise" => EdgeAnimDirection::CounterClockwise,
-                        "both" => EdgeAnimDirection::Both,
-                        _ => anyhow::bail!("edge.anim_direction must be clockwise, counterclockwise or both"),
-                    };
+                // The look of the chosen effect, or of every effect with none or random.
+                "anim_direction" | "anim_shrink" | "anim_color" | "anim_size" => {
+                    let field = &what["anim_".len()..];
+                    // Checked even when the chosen effect has no use for it.
+                    match field {
+                        "direction" => {
+                            EdgeAnimDirection::from_name(value).context("edge.anim_direction must be clockwise, counterclockwise or both")?;
+                        }
+                        "shrink" => {
+                            value.trim().parse::<bool>().context("edge.anim_shrink must be true or false")?;
+                        }
+                        _ => {}
+                    }
+                    for style in self.edges.targets() {
+                        let applies = match field {
+                            "direction" => style.has_direction(),
+                            "shrink" => style.can_shrink(),
+                            _ => true,
+                        };
+                        if applies {
+                            self.set_effect(style, field, value).map_err(|e| anyhow::anyhow!("edge.{what}: {e:#}"))?;
+                        }
+                    }
                 }
-                "anim_shrink" => self.edges.anim_shrink = value.parse().context("edge.anim_shrink must be true or false")?,
-                "anim_color" => self.edges.anim_color = value.trim().to_uppercase(),
-                "anim_size" => self.edges.anim_size = percent(value).context("edge.anim_size must be a percentage, e.g. 125")?,
+                effect if effect.contains('.') => {
+                    let (name, field) = effect.split_once('.').unwrap_or_default();
+                    let style = EdgeAnimStyle::from_name(name)
+                        .filter(|s| s.effect_index().is_some())
+                        .with_context(|| format!("unknown effect '{name}' (ring, semicircle, bar, pulse, laser, vortex, scan, liquid)"))?;
+                    self.set_effect(style, field, value).map_err(|e| anyhow::anyhow!("{key}: {e:#}"))?;
+                }
                 side => {
                     let edge = Edge::from_name(side).with_context(|| format!("unknown edge '{side}' (left, right, top, bottom)"))?;
                     let channel = if value.eq_ignore_ascii_case("none") || value.eq_ignore_ascii_case("off") {
@@ -962,6 +1253,26 @@ impl Config {
         Ok(())
     }
 
+    /// One field (color, size, direction, shrink) of one effect's own settings.
+    fn set_effect(&mut self, style: EdgeAnimStyle, field: &str, value: &str) -> Result<()> {
+        let name = style.name();
+        let e = self.edges.effect_mut(style).context("that effect has no settings")?;
+        match field {
+            "color" | "colour" => e.color = value.trim().to_uppercase(),
+            "size" => e.size = percent(value).context("must be a percentage, e.g. 125")?,
+            "direction" => {
+                anyhow::ensure!(style.has_direction(), "{name} has no direction (only ring, semicircle and bar)");
+                e.direction = EdgeAnimDirection::from_name(value).context("must be clockwise, counterclockwise or both")?;
+            }
+            "shrink" => {
+                anyhow::ensure!(style.can_shrink(), "{name} cannot shrink away (only ring and semicircle)");
+                e.shrink = value.trim().parse().context("must be true or false")?;
+            }
+            _ => anyhow::bail!("unknown setting '{field}' (color, size, direction, shrink)"),
+        }
+        Ok(())
+    }
+
     pub fn validate(&self) -> Result<()> {
         for cid in BUTTONS {
             let b = self.button(cid);
@@ -985,11 +1296,16 @@ impl Config {
         anyhow::ensure!((100..=5000).contains(&self.edges.dwell_ms), "edge.dwell must be between 100 and 5000 ms");
         anyhow::ensure!(self.edges.corner_margin <= 1000, "edge.corner must be at most 1000 pixels");
         anyhow::ensure!((200..=5000).contains(&self.locate.shake_time_ms), "locate.shake_time must be between 200 and 5000 ms");
-        anyhow::ensure!(parse_color(&self.edges.anim_color).is_some(), "edge.anim_color must be a colour like #FFCC00");
-        anyhow::ensure!(parse_color(&self.locate.color).is_some(), "locate.color must be a colour like #FFCC00");
-        for (key, size) in [("edge.anim_size", self.edges.anim_size), ("locate.size", self.locate.size)] {
-            anyhow::ensure!(EFFECT_SIZES.contains(&size) || (50..=200).contains(&size), "{key} must be between 50 and 200 percent");
+        for (style, e) in EDGE_EFFECTS.iter().zip(&self.edges.effects) {
+            let name = style.name();
+            anyhow::ensure!(parse_color(&e.color).is_some(), "edge.{name}.color must be a colour like #FFCC00");
+            anyhow::ensure!((50..=200).contains(&e.size), "edge.{name}.size must be between 50 and 200 percent");
         }
+        anyhow::ensure!(parse_color(&self.locate.color).is_some(), "locate.color must be a colour like #FFCC00");
+        anyhow::ensure!(
+            EFFECT_SIZES.contains(&self.locate.size) || (50..=200).contains(&self.locate.size),
+            "locate.size must be between 50 and 200 percent"
+        );
         for w in [self.haptics.switch_waveform, self.haptics.arrive_waveform, self.haptics.edge_waveform] {
             anyhow::ensure!(w <= 31 || w == crate::device::waveform::RANDOM, "haptics: waveforms are numbered 0 to 31, or random");
         }
@@ -1310,34 +1626,211 @@ mod tests {
         assert_eq!(c.edges.anim_style, EdgeAnimStyle::Ring);
         c.set("edge.control", "true").unwrap();
         c.set("edge.anim", "Vortex").unwrap();
-        c.set("edge.anim_direction", "both").unwrap();
-        c.set("edge.anim_shrink", "true").unwrap();
-        assert!(c.edges.require_control && c.edges.anim_shrink);
+        assert!(c.edges.require_control);
         assert_eq!(c.edges.anim_style, EdgeAnimStyle::Vortex);
-        assert_eq!(c.edges.anim_direction, EdgeAnimDirection::Both);
         assert!(c.set("edge.anim", "sparkle").is_err());
-        assert_eq!(c.edges.anim_color, DEFAULT_EFFECT_COLOR);
+        // The settings without an effect's name change the chosen effect only.
         c.set("edge.anim_color", "#0a84ff").unwrap();
-        assert_eq!(c.edges.anim_color, "#0A84FF");
-        assert_eq!(parse_color(&c.edges.anim_color), Some([0x0A, 0x84, 0xFF]));
+        assert_eq!(c.edges.effect(EdgeAnimStyle::Vortex).unwrap().color, "#0A84FF");
+        assert_eq!(c.edges.effect(EdgeAnimStyle::Ring).unwrap().color, DEFAULT_EFFECT_COLOR);
+        assert_eq!(parse_color("#0A84FF"), Some([0x0A, 0x84, 0xFF]));
         assert_eq!(format_color([0x0A, 0x84, 0xFF]), "#0A84FF");
         for bad in ["red", "#12345", "#GGGGGG", "0A84FF", "#한글한"] {
             assert!(c.set("edge.anim_color", bad).is_err(), "{bad}");
+            assert!(c.set("edge.bar.color", bad).is_err(), "{bad}");
         }
         assert!(c.set("edge.anim_direction", "up").is_err());
+        // Each effect by name.
+        c.set("edge.ring.direction", "both").unwrap();
+        c.set("edge.ring.shrink", "true").unwrap();
+        c.set("edge.bar.direction", "counterclockwise").unwrap();
+        c.set("edge.liquid.size", "150%").unwrap();
+        c.set("edge.scan.color", "#34c759").unwrap();
+        let ring = c.edges.effect(EdgeAnimStyle::Ring).unwrap();
+        assert_eq!((ring.direction, ring.shrink), (EdgeAnimDirection::Both, true));
+        assert_eq!(c.edges.effect(EdgeAnimStyle::Bar).unwrap().direction, EdgeAnimDirection::CounterClockwise);
+        assert_eq!(c.edges.effect(EdgeAnimStyle::Liquid).unwrap().size, 150);
+        assert_eq!(c.edges.effect(EdgeAnimStyle::Scan).unwrap().color, "#34C759");
+        assert!(c.set("edge.pulse.direction", "both").is_err(), "the pulse has no direction");
+        assert!(c.set("edge.bar.shrink", "true").is_err(), "the bar does not shrink");
+        assert!(c.set("edge.ring.size", "300").is_err());
+        assert!(c.set("edge.ring.sparkle", "1").is_err());
+        assert!(c.set("edge.random.color", "#FFFFFF").is_err());
+        assert!(c.set("edge.sparkle.color", "#FFFFFF").is_err());
         let back = Config::parse(&toml::to_string_pretty(&c).unwrap()).unwrap();
         assert_eq!(back.edges, c.edges);
+        // With random (or none) chosen, the old names change every effect.
         c.set("edge.anim", "random").unwrap();
+        c.set("edge.anim_size", "75").unwrap();
+        c.set("edge.anim_direction", "clockwise").unwrap();
+        assert!(c.edges.effects.iter().all(|e| e.size == 75));
+        assert_eq!(c.edges.effect(EdgeAnimStyle::Ring).unwrap().direction, EdgeAnimDirection::Clockwise);
+        assert_eq!(c.edges.effect(EdgeAnimStyle::Pulse).unwrap().direction, EdgeAnimDirection::default());
         for _ in 0..200 {
-            let picked = c.edges.anim_style.resolved();
+            let picked = c.edges.countdown().unwrap().style;
             assert!(picked != EdgeAnimStyle::None && picked != EdgeAnimStyle::Random, "{picked:?}");
         }
-        assert_eq!(EdgeAnimStyle::Bar.resolved(), EdgeAnimStyle::Bar);
+        c.set("edge.anim", "none").unwrap();
+        assert_eq!(c.edges.countdown(), None);
         // The table of drawing functions in overlay_macos.m is indexed by these numbers.
         for (i, style) in EDGE_ANIM_STYLES.into_iter().enumerate() {
             assert_eq!(style as usize, i);
             assert_eq!(EdgeAnimStyle::from_name(style.name()), Some(style));
         }
+        assert_eq!(&EDGE_ANIM_STYLES[1..9], &EDGE_EFFECTS);
+        for d in EDGE_ANIM_DIRECTIONS {
+            assert_eq!(EdgeAnimDirection::from_name(d.name()), Some(d));
+        }
+    }
+
+    #[test]
+    fn edge_effects_from_settings_before_0_12() {
+        // One look for every effect, as before 0.12.0: each effect starts with it.
+        let old = "[edges]\non = true\nanim_style = \"bar\"\nanim_direction = \"both\"\nanim_shrink = true\n\
+                   anim_color = \"#ff3b30\"\nanim_size = 125\n";
+        let c = Config::parse(old).unwrap();
+        c.validate().unwrap();
+        for (style, e) in EDGE_EFFECTS.iter().zip(&c.edges.effects) {
+            assert_eq!((e.color.as_str(), e.size), ("#FF3B30", 125), "{style:?}");
+            let direction = if style.has_direction() { EdgeAnimDirection::Both } else { EdgeAnimDirection::Clockwise };
+            assert_eq!((e.direction, e.shrink), (direction, style.can_shrink()), "{style:?}");
+        }
+        let current = c.edges.countdown().unwrap();
+        assert_eq!((current.style, current.effect.size, current.effect.direction), (EdgeAnimStyle::Bar, 125, EdgeAnimDirection::Both));
+        // Only some effects in the file: the others take the old keys.
+        let mixed = "[edges]\nanim_color = \"#0A84FF\"\nanim_size = 75\n[edges.effects.ring]\ncolor = \"#34C759\"\n";
+        let c = Config::parse(mixed).unwrap();
+        let ring = c.edges.effect(EdgeAnimStyle::Ring).unwrap();
+        assert_eq!((ring.color.as_str(), ring.size), ("#34C759", 75));
+        assert_eq!(c.edges.effect(EdgeAnimStyle::Laser).unwrap().color, "#0A84FF");
+        // Nothing at all: the defaults.
+        assert_eq!(Config::parse("enabled = true").unwrap().edges, Edges::default());
+        assert_eq!(Config::parse("[edges]\non = true\n").unwrap().edges.effects, Edges::default().effects);
+    }
+
+    #[test]
+    fn edge_effects_written_and_read_back() {
+        let mut c = Config::default();
+        c.set("edge.anim", "semicircle").unwrap();
+        c.set("edge.semicircle.color", "#FF2D92").unwrap();
+        c.set("edge.semicircle.size", "150").unwrap();
+        c.set("edge.semicircle.direction", "counterclockwise").unwrap();
+        c.set("edge.semicircle.shrink", "true").unwrap();
+        c.set("edge.vortex.size", "75").unwrap();
+        let text = toml::to_string_pretty(&c).unwrap();
+        assert!(text.contains("[edges.effects.ring]"), "{text}");
+        assert!(text.contains("[edges.effects.liquid]"), "{text}");
+        let table: toml::Table = text.parse().unwrap();
+        let edges = table["edges"].as_table().unwrap();
+        let effects = edges["effects"].as_table().unwrap();
+        assert_eq!(effects.len(), 8);
+        let semi = effects["semicircle"].as_table().unwrap();
+        assert_eq!(semi["color"].as_str(), Some("#FF2D92"));
+        assert_eq!(semi["size"].as_integer(), Some(150));
+        assert_eq!(semi["direction"].as_str(), Some("counterclockwise"));
+        assert_eq!(semi["shrink"].as_bool(), Some(true));
+        // Direction only for ring, semicircle and bar; shrink only for ring and semicircle.
+        let bar = effects["bar"].as_table().unwrap();
+        assert!(bar.contains_key("direction") && !bar.contains_key("shrink"));
+        let pulse = effects["pulse"].as_table().unwrap();
+        assert_eq!(pulse.keys().map(String::as_str).collect::<Vec<_>>(), ["color", "size"]);
+        // The old keys mirror the chosen effect, for older versions.
+        assert_eq!(edges["anim_color"].as_str(), Some("#FF2D92"));
+        assert_eq!(edges["anim_size"].as_integer(), Some(150));
+        assert_eq!(edges["anim_direction"].as_str(), Some("counterclockwise"));
+        assert_eq!(edges["anim_shrink"].as_bool(), Some(true));
+        let back = Config::parse(&text).unwrap();
+        assert_eq!(back.edges, c.edges);
+        assert_eq!(toml::to_string_pretty(&back).unwrap(), text);
+        // An older version reading it gets the chosen effect's look.
+        #[derive(Deserialize)]
+        struct OldEdges {
+            anim_color: String,
+            anim_size: u16,
+        }
+        let old: OldEdges = edges.clone().try_into().unwrap();
+        assert_eq!((old.anim_color.as_str(), old.anim_size), ("#FF2D92", 150));
+    }
+
+    #[test]
+    fn edge_effects_are_independent() {
+        let mut c = Config::default();
+        c.set("edge.anim", "ring").unwrap();
+        c.set("edge.anim_direction", "both").unwrap();
+        c.set("edge.anim_color", "#FF3B30").unwrap();
+        // Choosing "both" for the ring leaves the bar and semicircle as they were.
+        assert_eq!(c.edges.effect(EdgeAnimStyle::Bar).unwrap().direction, EdgeAnimDirection::Clockwise);
+        assert_eq!(c.edges.effect(EdgeAnimStyle::Semicircle).unwrap().direction, EdgeAnimDirection::Clockwise);
+        assert_eq!(c.edges.effect(EdgeAnimStyle::Bar).unwrap().color, DEFAULT_EFFECT_COLOR);
+        c.set("edge.anim", "bar").unwrap();
+        assert_eq!(c.edges.countdown().unwrap().effect, EdgeEffect::default());
+        c.set("edge.anim_size", "125").unwrap();
+        assert_eq!(c.edges.effect(EdgeAnimStyle::Ring).unwrap().size, 100);
+        let ring = c.edges.effect(EdgeAnimStyle::Ring).unwrap();
+        assert_eq!((ring.direction, ring.color.as_str()), (EdgeAnimDirection::Both, "#FF3B30"));
+    }
+
+    #[test]
+    fn unknown_edge_effect_settings_are_passed_over() {
+        let text = "[edges]\nanim_style = \"ring\"\n\
+                    [edges.effects]\nsparkle = 3\n\
+                    [edges.effects.ring]\ncolor = \"#0A84FF\"\nglitter = true\nsize = \"big\"\ndirection = \"sideways\"\n\
+                    [edges.effects.pulse]\ncolor = 7\nsize = 400\ndirection = \"both\"\nshrink = true\n\
+                    [edges.effects.galaxy]\ncolor = \"#FFFFFF\"\n";
+        let c = Config::parse(text).unwrap();
+        c.validate().unwrap();
+        let ring = c.edges.effect(EdgeAnimStyle::Ring).unwrap();
+        assert_eq!((ring.color.as_str(), ring.size, ring.direction), ("#0A84FF", 100, EdgeAnimDirection::Clockwise));
+        // Values of the wrong kind or out of range, or that the pulse has no use for.
+        assert_eq!(c.edges.effect(EdgeAnimStyle::Pulse).unwrap(), &EdgeEffect::default());
+        let again = toml::to_string_pretty(&c).unwrap();
+        assert!(!again.contains("galaxy") && !again.contains("glitter") && !again.contains("sparkle"), "{again}");
+    }
+
+    #[test]
+    fn random_countdown_varies_the_look() {
+        let mut c = Config::default();
+        c.set("edge.anim", "random").unwrap();
+        c.set("edge.ring.color", "#FF3B30").unwrap();
+        c.set("edge.ring.size", "150").unwrap();
+        c.set("edge.bar.direction", "both").unwrap();
+        // A fixed sequence of "random" numbers: effect, then direction, then shrink.
+        let seq = |numbers: Vec<usize>| {
+            let mut it = numbers.into_iter();
+            move |_n: usize| it.next().unwrap_or(0)
+        };
+        let ring = c.edges.countdown_with(&mut seq(vec![0, 1, 1])).unwrap();
+        assert_eq!(ring.style, EdgeAnimStyle::Ring);
+        assert_eq!((ring.effect.color.as_str(), ring.effect.size), ("#FF3B30", 150), "its own colour and size");
+        assert_eq!((ring.effect.direction, ring.effect.shrink), (EdgeAnimDirection::CounterClockwise, true));
+        let bar = c.edges.countdown_with(&mut seq(vec![2, 0])).unwrap();
+        assert_eq!((bar.style, bar.effect.direction, bar.effect.shrink), (EdgeAnimStyle::Bar, EdgeAnimDirection::Clockwise, false));
+        // Effects without a direction or shrink take no more numbers.
+        let mut asked = Vec::new();
+        let pulse = c.edges.countdown_with(&mut |n| {
+            asked.push(n);
+            3
+        });
+        assert_eq!(pulse.unwrap().style, EdgeAnimStyle::Pulse);
+        assert_eq!(asked, [8]);
+        // A chosen effect keeps its own direction and shrink.
+        c.set("edge.anim", "bar").unwrap();
+        let mut never = |_n: usize| -> usize { panic!("no random number for a chosen effect") };
+        assert_eq!(c.edges.countdown_with(&mut never).unwrap().effect.direction, EdgeAnimDirection::Both);
+        // Over many draws random shows every effect, direction and shrink.
+        c.set("edge.anim", "random").unwrap();
+        let (mut styles, mut dirs, mut shrinks) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..2000 {
+            let d = c.edges.countdown().unwrap();
+            styles.push(d.style);
+            if d.style == EdgeAnimStyle::Ring {
+                dirs.push(d.effect.direction);
+                shrinks.push(d.effect.shrink);
+            }
+        }
+        assert!(EDGE_EFFECTS.iter().all(|s| styles.contains(s)));
+        assert!(EDGE_ANIM_DIRECTIONS.iter().all(|d| dirs.contains(d)));
+        assert!(shrinks.contains(&true) && shrinks.contains(&false));
     }
 
     #[test]
@@ -1359,7 +1852,7 @@ mod tests {
         c.set("locate.style", "spotlight").unwrap();
         c.set("locate.size", "150%").unwrap();
         c.set("edge.anim_size", "75").unwrap();
-        assert_eq!((c.locate.size, c.edges.anim_size), (150, 75));
+        assert_eq!((c.locate.size, c.edges.effect(EdgeAnimStyle::Ring).unwrap().size), (150, 75));
         assert!(c.set("locate.size", "300").is_err());
         c.set("locate.color", "#34c759").unwrap();
         assert_eq!(c.locate.color, "#34C759");

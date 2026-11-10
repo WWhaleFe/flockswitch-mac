@@ -3,6 +3,9 @@
 //! copy; they hold the settings file as it is (same TOML in every port: macOS, Windows,
 //! Linux) after a comment saying where it came from. A file from another computer may
 //! have settings this one does not know; those are left out, not refused.
+//!
+//! At most `MAX_SAVED` files are kept (every .toml file in the folder counts); they can
+//! be renamed, and deleted (moved to the Trash), from the settings window.
 
 use crate::config::Config;
 use anyhow::{bail, Context, Result};
@@ -10,6 +13,50 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 const PREFIX: &str = "flockswitch-settings-";
+
+/// How many settings files the folder may hold before Save refuses to add one.
+pub const MAX_SAVED: usize = 10;
+
+/// A name (without ".toml") is at most this many characters.
+pub const MAX_NAME: usize = 60;
+
+/// Characters a name may not have: not allowed in file names on Windows, or a folder
+/// separator.
+pub const BAD_NAME_CHARS: [char; 9] = ['/', '\\', ':', '*', '?', '"', '<', '>', '|'];
+
+/// Save refused: the folder already has `MAX_SAVED` settings files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Full;
+
+impl std::fmt::Display for Full {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "there are already {MAX_SAVED} saved settings files")
+    }
+}
+
+impl std::error::Error for Full {}
+
+/// Why a file could not be renamed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NameError {
+    Empty,
+    TooLong,
+    /// One of `BAD_NAME_CHARS`, or a control character.
+    BadChar(char),
+    /// Another file already has that name; it is never overwritten.
+    Exists,
+    /// The system refused, and why.
+    Failed(String),
+}
+
+/// How a file went away.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Removed {
+    /// Into the Trash, where it can be put back from.
+    Trashed,
+    /// Deleted for good: this volume has no Trash.
+    Deleted,
+}
 
 /// Documents/flockswitch.
 pub fn folder() -> PathBuf {
@@ -28,14 +75,19 @@ pub struct Saved {
     pub modified: Option<SystemTime>,
 }
 
-/// Writes `cfg` to a new file in the folder and returns its path.
+/// Writes `cfg` to a new file in the folder and returns its path. Refuses (with `Full`)
+/// when the folder already has `MAX_SAVED` settings files.
 pub fn export(cfg: &Config) -> Result<PathBuf> {
-    let dir = folder();
-    std::fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
-    let now = SystemTime::now();
-    let host = host_name();
-    let text = export_text(cfg, &host, now)?;
-    let base = file_stem(&host, now);
+    export_in(&folder(), cfg, &host_name(), SystemTime::now())
+}
+
+fn export_in(dir: &Path, cfg: &Config, host: &str, now: SystemTime) -> Result<PathBuf> {
+    if list_in(dir).len() >= MAX_SAVED {
+        return Err(Full.into());
+    }
+    std::fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
+    let text = export_text(cfg, host, now)?;
+    let base = file_stem(host, now);
     let path = (0..)
         .map(|i| dir.join(if i == 0 { format!("{base}.toml") } else { format!("{base}-{i}.toml") }))
         .find(|p| !p.exists())
@@ -88,6 +140,85 @@ fn list_in(dir: &Path) -> Vec<Saved> {
         .collect();
     found.sort_by(|a, b| b.modified.cmp(&a.modified).then_with(|| b.name.cmp(&a.name)));
     found
+}
+
+/// How many settings files the folder has.
+pub fn count() -> usize {
+    list().len()
+}
+
+/// A name as it will be used for a file: without spaces at the ends or a ".toml" typed
+/// after it, checked.
+pub fn check_name(name: &str) -> Result<String, NameError> {
+    let mut name = name.trim();
+    let cut = name.len().saturating_sub(5);
+    if name.get(cut..).is_some_and(|end| end.eq_ignore_ascii_case(".toml")) {
+        name = name[..cut].trim_end();
+    }
+    if name.is_empty() {
+        return Err(NameError::Empty);
+    }
+    if let Some(c) = name.chars().find(|c| BAD_NAME_CHARS.contains(c) || c.is_control()) {
+        return Err(NameError::BadChar(c));
+    }
+    if name.chars().count() > MAX_NAME {
+        return Err(NameError::TooLong);
+    }
+    if name == "." || name == ".." {
+        return Err(NameError::BadChar('.'));
+    }
+    Ok(name.to_string())
+}
+
+/// Gives a saved file another name (still ending in .toml, in the same folder) and
+/// returns its new path. Never replaces another file.
+pub fn rename(path: &Path, new_name: &str) -> Result<PathBuf, NameError> {
+    let name = check_name(new_name)?;
+    let dir = path.parent().ok_or_else(|| NameError::Failed("no folder".into()))?;
+    let target = dir.join(format!("{name}.toml"));
+    if target == path {
+        return Ok(target);
+    }
+    // On a case-insensitive disk "a.toml" exists when renaming "A.toml" to it: that is
+    // the same file, getting another case.
+    let same_file = path.file_name().zip(target.file_name()).is_some_and(|(a, b)| {
+        a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
+    });
+    if !same_file && (target.exists() || target.symlink_metadata().is_ok()) {
+        return Err(NameError::Exists);
+    }
+    std::fs::rename(path, &target).map_err(|e| NameError::Failed(e.to_string()))?;
+    log::info!("settings file {} renamed to {}", path.display(), target.display());
+    Ok(target)
+}
+
+/// Moves a saved file to the Trash, or deletes it where there is no Trash.
+pub fn delete(path: &Path) -> Result<Removed> {
+    remove(path, true)
+}
+
+fn remove(path: &Path, use_trash: bool) -> Result<Removed> {
+    let is_toml = path.extension().is_some_and(|x| x.eq_ignore_ascii_case("toml"));
+    if !is_toml || !path.is_file() {
+        bail!("{} is not a settings file", path.display());
+    }
+    if use_trash && move_to_trash(path) {
+        log::info!("settings file {} moved to the Trash", path.display());
+        return Ok(Removed::Trashed);
+    }
+    std::fs::remove_file(path).with_context(|| format!("cannot delete {}", path.display()))?;
+    log::info!("settings file {} deleted", path.display());
+    Ok(Removed::Deleted)
+}
+
+/// NSFileManager's trashItemAtURL (files_macos.m).
+fn move_to_trash(path: &Path) -> bool {
+    extern "C" {
+        fn fs_move_to_trash(path: *const std::ffi::c_char) -> bool;
+    }
+    let Some(c) = path.to_str().and_then(|p| std::ffi::CString::new(p).ok()) else { return false };
+    // Safety: a valid C string for the length of the call; nothing is kept.
+    unsafe { fs_move_to_trash(c.as_ptr()) }
 }
 
 /// Reads a saved file into settings that can be applied as they are.
@@ -244,6 +375,93 @@ mod tests {
         assert_eq!((c.locate.shake_key, c.locate.shake_time_ms), (ShakeKey::Cmd, 500));
         assert_eq!(c.hotkeys.key(1), "", "⌘Q is left out on macOS");
         assert_eq!(c.hotkeys.key(2), "ctrl+alt+2");
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("flockswitch-backup-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn at_most_ten_saved() {
+        let dir = scratch("limit");
+        let c = Config::default();
+        let start = SystemTime::now();
+        for i in 0..MAX_SAVED {
+            export_in(&dir, &c, "Mac", start + std::time::Duration::from_secs(i as u64)).unwrap();
+        }
+        assert_eq!(list_in(&dir).len(), MAX_SAVED);
+        let refused = export_in(&dir, &c, "Mac", start + std::time::Duration::from_secs(99)).unwrap_err();
+        assert!(refused.downcast_ref::<Full>().is_some(), "{refused:#}");
+        assert_eq!(list_in(&dir).len(), MAX_SAVED, "nothing written");
+        // Other files in the folder do not count; any .toml file does.
+        std::fs::write(dir.join("notes.txt"), "x").unwrap();
+        remove(&list_in(&dir)[0].path, false).unwrap();
+        export_in(&dir, &c, "Mac", start + std::time::Duration::from_secs(100)).unwrap();
+        assert!(export_in(&dir, &c, "Mac", start + std::time::Duration::from_secs(101)).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rename_checks_the_name() {
+        assert_eq!(check_name("  home office  "), Ok("home office".into()));
+        assert_eq!(check_name("work.toml"), Ok("work".into()), "a .toml typed after it is not doubled");
+        assert_eq!(check_name("맥북 설정"), Ok("맥북 설정".into()));
+        assert_eq!(check_name(""), Err(NameError::Empty));
+        assert_eq!(check_name("   "), Err(NameError::Empty));
+        assert_eq!(check_name(".toml"), Err(NameError::Empty));
+        assert_eq!(check_name(&"가".repeat(60)), Ok("가".repeat(60)), "60 characters, not bytes");
+        assert_eq!(check_name(&"a".repeat(61)), Err(NameError::TooLong));
+        for c in BAD_NAME_CHARS {
+            assert_eq!(check_name(&format!("a{c}b")), Err(NameError::BadChar(c)), "{c}");
+        }
+        assert_eq!(check_name("tab\there"), Err(NameError::BadChar('\t')));
+        assert_eq!(check_name(".."), Err(NameError::BadChar('.')));
+
+        let dir = scratch("rename");
+        let a = dir.join("a.toml");
+        std::fs::write(&a, "enabled = true\n").unwrap();
+        std::fs::write(dir.join("taken.toml"), "enabled = false\n").unwrap();
+        assert_eq!(rename(&a, "taken"), Err(NameError::Exists));
+        assert_eq!(std::fs::read_to_string(dir.join("taken.toml")).unwrap(), "enabled = false\n", "never overwritten");
+        assert_eq!(rename(&a, "bad/name"), Err(NameError::BadChar('/')));
+        let moved = rename(&a, "office").unwrap();
+        assert_eq!(moved, dir.join("office.toml"));
+        assert!(!a.exists() && moved.is_file());
+        // Another case of the same name is allowed.
+        let upper = rename(&moved, "Office").unwrap();
+        assert!(upper.is_file());
+        let names: Vec<String> = list_in(&dir).into_iter().map(|s| s.name).collect();
+        assert!(names.contains(&"Office".to_string()) && names.len() == 2, "{names:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_removes_only_settings_files() {
+        let dir = scratch("delete");
+        let file = dir.join("old.toml");
+        std::fs::write(&file, "enabled = true\n").unwrap();
+        std::fs::write(dir.join("keep.txt"), "x").unwrap();
+        assert!(remove(&dir.join("keep.txt"), false).is_err());
+        assert!(remove(&dir, false).is_err());
+        assert!(remove(&dir.join("missing.toml"), false).is_err());
+        assert_eq!(remove(&file, false).unwrap(), Removed::Deleted);
+        assert!(!file.exists() && dir.join("keep.txt").exists());
+        assert!(list_in(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[ignore = "puts a file in this Mac's Trash"]
+    fn delete_moves_to_the_trash() {
+        let dir = scratch("trash");
+        let file = dir.join("flockswitch-trash-test.toml");
+        std::fs::write(&file, "enabled = true\n").unwrap();
+        assert_eq!(delete(&file).unwrap(), Removed::Trashed);
+        assert!(!file.exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

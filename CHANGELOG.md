@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.12.0 — 2026-11-10
+
+- Edge countdown: each effect (ring, semicircle, bar, pulse, laser, vortex, scan, liquid) keeps its own colour and size, and its own direction (ring, semicircle, bar) and shrink-away (ring, semicircle). Settings → Switching → Edges shows and changes the chosen effect's; choosing "both" for the ring no longer changes the bar. Older settings give every effect the look they had. In the file each effect has its own table, `[edges.effects.ring]` and so on (the same in the Windows and Linux versions, so backups still move between them). Command line: `set edge.ring.color #FF3B30`, `set edge.bar.size 125`, `set edge.semicircle.direction both`, `set edge.ring.shrink true`; `set edge.anim_color …` and the other old names change the chosen effect (every effect with none or random chosen)
+- **Random** draws each countdown as a different effect in that effect's own colour and size, and picks its direction and shrink-away at random where it has them, so it varies more
+- The countdown's glow grows and shrinks with the chosen size like the rest of the effect
+- Settings backup: shorter buttons — **Save**, **Load…**, **Manage…**, **Open folder** — and at most 10 saved files (every .toml file in `~/Documents/flockswitch` counts; the card shows how many, e.g. 3/10). With 10 there, Save writes nothing and says so, with a way to Manage. **Manage…** lists the files, newest first, to **Rename** (in place; up to 60 characters, none of / \ : * ? " < > |, never over another file) or **Delete** (after a confirmation, into the Trash)
+- The settings window opens 970 high, so the General tab fits without scrolling with every find-the-cursor option on and a note under the shortcut or the update. When a page still does not fit, the window grows once to fit it (up to the display's height); it never shrinks a window you made bigger
+- English: the bar's third direction is now "Both ends", which fits its button
+
 ## 0.11.1 — 2026-11-10
 
 - More room between rows and the lines between them. Rows with a segment bar or buttons on the right (size, language, shortcut) sat almost on the line below, because the control pulled the row's height in; now the space above and below is even

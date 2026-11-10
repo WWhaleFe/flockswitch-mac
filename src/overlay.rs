@@ -53,7 +53,9 @@ pub fn edge_begin(edges: &Edges, edge: Edge, display: &Rect, elapsed: Duration, 
     if !ready() {
         return;
     }
-    let (red, green, blue) = components(&edges.anim_color);
+    let Some(countdown) = edges.countdown() else { return };
+    let effect = &countdown.effect;
+    let (red, green, blue) = components(&effect.color);
     // Safety: plain values; the call only queues work for the main thread.
     unsafe {
         fs_overlay_edge_begin(
@@ -62,16 +64,16 @@ pub fn edge_begin(edges: &Edges, edge: Edge, display: &Rect, elapsed: Duration, 
             display.w,
             display.h,
             edge as i32,
-            edges.anim_style.resolved() as i32,
-            edges.anim_direction as i32,
-            edges.anim_shrink,
+            countdown.style as i32,
+            effect.direction as i32,
+            effect.shrink,
             elapsed.as_secs_f64(),
             duration.as_secs_f64(),
             preview,
             red,
             green,
             blue,
-            f64::from(edges.anim_size) / 100.0,
+            f64::from(effect.size) / 100.0,
         );
     }
 }

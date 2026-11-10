@@ -12,11 +12,13 @@ fn main() {
     println!("cargo:rerun-if-changed=packaging/icon/master.rs");
     println!("cargo:rerun-if-changed=src/ble_macos.m");
     println!("cargo:rerun-if-changed=src/overlay_macos.m");
+    println!("cargo:rerun-if-changed=src/files_macos.m");
     println!("cargo:rerun-if-changed=build.rs");
 
     cc::Build::new()
         .file("src/ble_macos.m")
         .file("src/overlay_macos.m")
+        .file("src/files_macos.m")
         .flag("-fobjc-arc")
         // Info.plist promises macOS 11; left alone, this follows the machine building it.
         .flag("-mmacosx-version-min=11.0")

@@ -36,9 +36,14 @@ static void fill_accent(CGContextRef c, double alpha) {
     CGContextSetRGBFillColor(c, gAccent[0], gAccent[1], gAccent[2], alpha);
 }
 
+/// The chosen size of the effect being drawn. Shapes follow it through the scaled
+/// drawing, but a shadow's blur does not (it is in device space), so the glow is
+/// widened by hand.
+static CGFloat gGlowScale = 1;
+
 static void glow(CGContextRef c, double blur, double alpha) {
     CGColorRef color = CGColorCreateSRGB(gAccent[0], gAccent[1], gAccent[2], alpha);
-    CGContextSetShadowWithColor(c, CGSizeZero, blur, color);
+    CGContextSetShadowWithColor(c, CGSizeZero, blur * gGlowScale, color);
     CGColorRelease(color);
 }
 
@@ -607,6 +612,7 @@ static void paint_edge(CGContextRef c, CGSize size) {
     f.t = CACurrentMediaTime() - gEdge.start;
     f.p = clamp01(f.t / gEdge.duration);
     memcpy(gAccent, gEdge.color, sizeof gAccent);
+    gGlowScale = gEdge.scale;
     CGContextSaveGState(c);
     // The chosen size: everything grows or shrinks around the point at the edge.
     CGContextTranslateCTM(c, f.anchor.x, f.anchor.y);
@@ -628,6 +634,7 @@ static void paint_locate(CGContextRef c, CGSize size) {
     LocateFrame f = { .c = c, .size = size, .center = center, .t = t, .scale = gLocate.full_screen ? gLocate.scale : 1 };
     f.fade = clamp01((kLocateSeconds - t) / kLocateFade);
     memcpy(gAccent, gLocate.color, sizeof gAccent);
+    gGlowScale = gLocate.scale;
     CGContextSaveGState(c);
     if (!gLocate.full_screen) {
         CGContextTranslateCTM(c, center.x, center.y);
