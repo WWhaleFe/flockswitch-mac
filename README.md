@@ -32,7 +32,7 @@ With [Homebrew](https://brew.sh):
 brew install --cask wwhalefe/tap/flockswitch
 ```
 
-This puts `flockswitch.app` in Applications and the `flockswitch` command on your PATH; `brew update && brew upgrade --cask flockswitch` updates it (on a Mac `--cask` is required). It starts by itself after installing or upgrading, with no security prompt.
+This puts `flockswitch.app` in Applications and the `flockswitch` command on your PATH; `brew update && brew upgrade --cask flockswitch` updates it (on a Mac `--cask` is required). On Homebrew 6 or newer, if it says `Refusing to load … from untrusted tap wwhalefe/tap`, run once: `brew trust --cask wwhalefe/tap/flockswitch`. It starts by itself after installing or upgrading, with no security prompt.
 
 flockswitch also updates itself: when it finds a new version (at start and every 24 hours) it downloads it, checks it against the SHA-256 checksums published with the release, puts it in place of the app and restarts. Turn off **Install updates automatically** in Settings → General to install only when you press **Update now** (`set auto_update false`). **Check now** (in Settings or the ⇄ menu) only looks; when it finds a new version, **Update now** installs it in the background whatever that setting. If the app cannot be replaced where it is (a folder it may not write to), Update now saves the new version to Downloads instead. A Homebrew install then still reports the old version to `brew`, which is harmless: the next `brew upgrade --cask flockswitch` simply installs it again.
 

@@ -28,7 +28,7 @@ flockswitch는 **MX Master 3**와 **MX Master 4**를 바탕으로 만들고 시�
 brew install --cask wwhalefe/tap/flockswitch
 ```
 
-`flockswitch.app`이 응용 프로그램 폴더에 설치되고, 터미널에서 `flockswitch` 명령도 쓸 수 있습니다. 업데이트는 `brew update && brew upgrade --cask flockswitch`입니다 (맥에서는 `--cask`가 꼭 필요합니다). 설치와 업데이트가 끝나면 앱이 바로 실행되고, 보안 확인은 필요 없습니다.
+`flockswitch.app`이 응용 프로그램 폴더에 설치되고, 터미널에서 `flockswitch` 명령도 쓸 수 있습니다. 업데이트는 `brew update && brew upgrade --cask flockswitch`입니다 (맥에서는 `--cask`가 꼭 필요합니다). Homebrew 6 이상에서 `Refusing to load … from untrusted tap wwhalefe/tap` 오류가 나면 한 번만 `brew trust --cask wwhalefe/tap/flockswitch`를 실행하세요. 설치와 업데이트가 끝나면 앱이 바로 실행되고, 보안 확인은 필요 없습니다.
 
 flockswitch는 스스로도 업데이트합니다. 시작할 때와 24시간마다 새 버전을 찾으면 내려받아, 릴리스에 함께 올라온 SHA-256 체크섬과 맞는지 확인한 뒤 앱을 바꿔 넣고 다시 시작합니다. 설정 → 일반에서 **새 버전 자동 설치**를 끄면 **지금 업데이트**를 누를 때만 설치합니다 (`set auto_update false`). 설정 창이나 ⇄ 메뉴의 **지금 확인**은 확인만 하고, 새 버전이 있으면 나타나는 **지금 업데이트**는 이 설정과 상관없이 백그라운드에서 설치합니다. 앱이 있는 폴더에 쓸 수 없는 등 그 자리에서 바꿀 수 없으면, 지금 업데이트는 새 버전을 다운로드 폴더에 받아 둡니다. Homebrew로 설치했다면 `brew`에는 예전 버전으로 남지만 문제는 없습니다. 다음 `brew upgrade --cask flockswitch` 때 같은 버전을 다시 설치할 뿐입니다.
 
