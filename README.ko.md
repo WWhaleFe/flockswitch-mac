@@ -92,9 +92,9 @@ flockswitch는 이 맥에 연결된 Logitech 장치와 통신합니다. 인터�
 
 | 연결 | 상태 |
 |---|---|
-| Logi Bolt 수신기 | 실기기 확인 |
+| Logi Bolt 수신기 | 실기기 확인 (MX Master 4, MX Mechanical) |
 | Unifying 수신기 | 실기기 확인 (MX Master 3) |
-| 블루투스 | 구현, 미확인 |
+| 블루투스 | 실기기 확인 |
 
 ## 라이선스
 

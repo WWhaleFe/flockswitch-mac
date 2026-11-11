@@ -78,9 +78,9 @@ flockswitch talks to the Logitech devices connected to this Mac. Its only intern
 
 | Connection | Status |
 |---|---|
-| Logi Bolt receiver | tested |
+| Logi Bolt receiver | tested (MX Master 4, MX Mechanical) |
 | Unifying receiver | tested (MX Master 3) |
-| Bluetooth | implemented, untested |
+| Bluetooth | tested |
 
 ## Related projects
 

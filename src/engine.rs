@@ -298,7 +298,7 @@ impl Engine {
                         && x.key() == key
                         && !self.online.contains(&(x.endpoint, x.index)))
                 });
-                let is_mouse = d.kind.map_or(true, |k| k == DeviceKind::Mouse);
+                let is_mouse = d.kind.is_none_or(|k| k == DeviceKind::Mouse);
                 // A mouse with any of the trigger buttons can be chosen as the master.
                 let can_be_master = is_mouse
                     && d.has(FEATURE_REPROG_V4)
@@ -352,7 +352,7 @@ impl Engine {
                 continue;
             }
             let matches = if want.eq_ignore_ascii_case("auto") {
-                d.kind.map_or(true, |k| k == DeviceKind::Mouse)
+                d.kind.is_none_or(|k| k == DeviceKind::Mouse)
             } else {
                 d.key().eq_ignore_ascii_case(&want) || d.name.to_lowercase().contains(&want.to_lowercase())
             };

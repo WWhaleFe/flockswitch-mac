@@ -31,7 +31,6 @@ static NSString *const kPnpIdCharUUID            = @"2A50";
 @property (nonatomic, strong) dispatch_semaphore_t writeSem;
 @property (nonatomic, strong) dispatch_semaphore_t readSem;
 @property (nonatomic, strong) NSMutableArray<NSData *> *reports;
-@property (nonatomic, assign) uint16_t vendorId;
 @property (nonatomic, assign) uint16_t productId;
 @property (nonatomic, assign) int pendingCharServices;
 @property (nonatomic, assign) bool notifyOk;
@@ -132,9 +131,9 @@ didUpdateValueForCharacteristic:(CBCharacteristic *)characteristic
     }
     NSData *data = characteristic.value;
     if (characteristic == self.pnpChar) {
+        // PnP ID: [vendor ID source, vendor ID (LE), product ID (LE), version (LE)].
         if (data && data.length >= 5) {
             const uint8_t *bytes = (const uint8_t *)data.bytes;
-            self.vendorId = (uint16_t)bytes[1] | ((uint16_t)bytes[2] << 8);
             self.productId = (uint16_t)bytes[3] | ((uint16_t)bytes[4] << 8);
         }
         dispatch_semaphore_signal(self.pnpSem);

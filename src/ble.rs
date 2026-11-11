@@ -86,7 +86,7 @@ impl BleDevice {
     }
 
     fn frame(report: &[u8], f: Framing) -> Vec<u8> {
-        let mut long = vec![0u8; LONG_LEN];
+        let mut long = [0u8; LONG_LEN];
         let copy_len = report.len().min(LONG_LEN);
         long[..copy_len].copy_from_slice(&report[..copy_len]);
         long[0] = REPORT_LONG;

@@ -51,9 +51,6 @@ pub struct Endpoint {
     pub product: String,
     /// USB/Bluetooth product ID. For a Bluetooth device this identifies the model.
     pub product_id: u16,
-    /// Stable identity of the endpoint across re-enumerations.
-    #[allow(dead_code)]
-    pub key: String,
     backend: Backend,
     /// The OS lists a separate short collection but it could not be opened (Windows),
     /// so short requests (receiver registers) cannot be sent.
@@ -317,7 +314,7 @@ pub fn discover(api: &HidApi) -> Vec<Endpoint> {
     let mut out = Vec::new();
     // Bluetooth handles that did not answer yet; kept unless CoreBluetooth reaches the device.
     let mut unanswered: Vec<Endpoint> = Vec::new();
-    for (key, g) in groups(api) {
+    for g in groups(api).into_values() {
         let (Some(long_path), Some(kind)) = (g.long, g.kind) else { continue };
         let open = |p: &str| api.open_path(&std::ffi::CString::new(p).unwrap());
         let long = match open(&long_path) {
@@ -345,7 +342,6 @@ pub fn discover(api: &HidApi) -> Vec<Endpoint> {
             kind,
             product: g.product,
             product_id: g.product_id,
-            key,
             backend: Backend::Hid { long, short },
             backlog: VecDeque::new(),
             short_unavailable,
@@ -364,12 +360,13 @@ pub fn discover(api: &HidApi) -> Vec<Endpoint> {
         // if macOS does not route HID++ reports through IOHIDDevice for this model,
         // CoreBluetooth GATT opens it instead. A slow answer is not proof of that, and
         // a device dropped here would not be looked at again until the OS list changes.
-        if ep.kind == EndpointKind::Direct && g.usage_page == 0xFF43 {
-            if !matches!(ep.request(DIRECT_INDEX, 0x00, 0, &[0, 0], Duration::from_millis(800)), Ok(Reply::Ok(_))) {
-                log::debug!("{} (0xFF43 IOHIDDevice) did not answer HID++; trying CoreBluetooth GATT", ep.product);
-                unanswered.push(ep);
-                continue;
-            }
+        if ep.kind == EndpointKind::Direct
+            && g.usage_page == 0xFF43
+            && !matches!(ep.request(DIRECT_INDEX, 0x00, 0, &[0, 0], Duration::from_millis(800)), Ok(Reply::Ok(_)))
+        {
+            log::debug!("{} (0xFF43 IOHIDDevice) did not answer HID++; trying CoreBluetooth GATT", ep.product);
+            unanswered.push(ep);
+            continue;
         }
         log::debug!("endpoint {:?} '{}' (separate short handle: {})", kind, ep.product, has_separate_short);
         out.push(ep);
@@ -391,7 +388,6 @@ pub fn discover(api: &HidApi) -> Vec<Endpoint> {
             kind: EndpointKind::Direct,
             product: ble.product.clone(),
             product_id: ble.product_id,
-            key: ble.key.clone(),
             backend: Backend::Ble(ble),
             short_unavailable: true,
             backlog: VecDeque::new(),

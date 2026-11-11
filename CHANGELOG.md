@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.13.0 — 2026-11-12
+
+- Tidy-up release: nothing changes in what flockswitch does, its settings or its command line, and settings from earlier versions load as before
+- The menu-bar app no longer collects the menu-bar icon's hover and click notices, which nothing read, in a list that grew for as long as it ran
+- A smaller program: `RUST_LOG` still filters the log by module and level, but no longer takes regular expressions
+- README: Bluetooth is marked as tested
+
 ## 0.12.0 — 2026-11-10
 
 - Edge countdown: each effect (ring, semicircle, bar, pulse, laser, vortex, scan, liquid) keeps its own colour and size, and its own direction (ring, semicircle, bar) and shrink-away (ring, semicircle). Settings → Switching → Edges shows and changes the chosen effect's; choosing "both" for the ring no longer changes the bar. Older settings give every effect the look they had. In the file each effect has its own table, `[edges.effects.ring]` and so on (the same in the Windows and Linux versions, so backups still move between them). Command line: `set edge.ring.color #FF3B30`, `set edge.bar.size 125`, `set edge.semicircle.direction both`, `set edge.ring.shrink true`; `set edge.anim_color …` and the other old names change the chosen effect (every effect with none or random chosen)

@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use tao::event::{Event, StartCause};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
-use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
+use tray_icon::{Icon, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 #[derive(Clone)]
 enum Action {
@@ -47,10 +47,9 @@ pub fn run(shared: Arc<Shared>) -> Result<()> {
     spawn_replacement_watch(shared.clone());
     crate::edge::spawn(shared.clone());
 
-    #[allow(unused_mut)]
     let mut event_loop = EventLoopBuilder::new().build();
+    // Menu-bar only: no Dock icon, no app switcher entry.
     {
-        // Menu-bar only: no Dock icon, no app switcher entry.
         use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
         event_loop.set_activation_policy(ActivationPolicy::Accessory);
     }
@@ -187,6 +186,10 @@ fn tray_icon(enabled: bool) -> Result<Icon> {
 
 impl Ui {
     fn create_tray(&mut self) -> Result<()> {
+        // Hovering over and clicking the icon are reported as TrayIconEvents, kept in a
+        // queue that grows for as long as nobody reads it. Only the menu matters here
+        // (MenuEvent, a separate channel), so they are dropped as they come.
+        TrayIconEvent::set_event_handler(Some(|_| {}));
         let menu = self.build_menu();
         let cfg = self.shared.config();
         let builder = TrayIconBuilder::new().with_menu(Box::new(menu)).with_tooltip("flockswitch");
