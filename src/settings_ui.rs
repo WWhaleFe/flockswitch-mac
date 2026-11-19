@@ -899,6 +899,15 @@ impl SettingsApp {
             if cid == BUTTON_MIDDLE {
                 hint(ui, p, t.buttons_hint);
             }
+            if cid == BUTTON_WHEEL_MODE && self.cfg.button(cid).on {
+                divider(ui, p);
+                let mut keep = self.cfg.keep_wheel_mode;
+                let (flipped, label) = switch_row_full(ui, p, t.keep_wheel_mode, None, &mut keep);
+                info_icon(ui, p, Pos2::new(label.right() + 16.0, label.center().y), "keep-wheel-help", t.keep_wheel_mode_help);
+                if flipped {
+                    self.apply(|c| c.keep_wheel_mode = keep);
+                }
+            }
             ui.add_space(10.0);
         });
     }
