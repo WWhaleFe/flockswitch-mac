@@ -43,6 +43,7 @@ const SECTION_HEAD: f32 = 32.0;
 mod connect;
 mod keys;
 mod logitech;
+mod shots;
 
 /// The window: one fixed size, no resizing, no maximize button.
 fn window_builder(title: &str, icon: egui::IconData) -> egui::ViewportBuilder {
@@ -57,11 +58,18 @@ fn window_builder(title: &str, icon: egui::IconData) -> egui::ViewportBuilder {
         .with_active(true)
 }
 
+/// The screenshot output folder (FLOCKSWITCH_SHOTS), when that mode is on.
+pub fn shots_dir() -> Option<&'static std::path::PathBuf> {
+    shots::dir()
+}
+
 /// Opens the window. `lock` keeps a second window from opening; a connection to it
 /// means "Settings…" was chosen again, so the window comes back to the front.
 /// `show_update` opens on the General page (from the "new version" menu item).
 pub fn run(lock: std::net::TcpListener, show_update: bool) -> Result<()> {
-    if let Ok(cfg) = Config::load_or_create() {
+    if shots::active() {
+        crate::i18n::set_language(shots::language());
+    } else if let Ok(cfg) = Config::load_or_create() {
         crate::i18n::set_language(&cfg.language);
     }
     let t = texts();
@@ -457,6 +465,8 @@ struct SettingsApp {
     backup_count: usize,
     /// "Manage…" is open.
     backup_manager: Option<BackupManager>,
+    /// Screenshot mode (FLOCKSWITCH_SHOTS): demo data and one picture per page.
+    shots: Option<shots::Shots>,
 }
 
 /// "Manage…": the saved files, newest first, each to rename or delete.
@@ -618,7 +628,7 @@ impl SettingsApp {
             update_probed: false,
             rescan_at: None,
             uninstall: Uninstall::Idle,
-            cfg: Config::load_or_create().unwrap_or_default(),
+            cfg: if shots::active() { Config::default() } else { Config::load_or_create().unwrap_or_default() },
             status: StatusFile::default(),
             autostart,
             autostart_on,
@@ -639,7 +649,16 @@ impl SettingsApp {
             backup_full: false,
             backup_count: 0,
             backup_manager: None,
+            shots: shots::Shots::new(),
         };
+        if app.shots.is_some() {
+            app.cfg = shots::demo_config();
+            app.net_status = Some(shots::demo_status(&app.cfg));
+            app.status = shots::demo_device_status();
+            app.net_ips.1 = vec!["192.168.0.12".into()];
+            *app.update.lock().unwrap() = UpdateUi::UpToDate;
+            return app;
+        }
         app.refresh();
         if show_update || app.cfg.check_updates {
             app.check_update(ctx);
@@ -684,6 +703,9 @@ impl SettingsApp {
     /// Re-reads settings and what the running app reports, so the window also reflects
     /// changes made by hand or by a master.
     fn refresh(&mut self) {
+        if self.shots.is_some() {
+            return;
+        }
         self.last_refresh = Instant::now();
         if let Ok(cfg) = Config::load_or_create() {
             crate::i18n::set_language(&cfg.language);
@@ -774,6 +796,7 @@ impl SettingsApp {
     /// One frame of the window (`App::ui`, without the frame handle, so a test can run it).
     fn show(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
+        self.shots_step(&ctx);
         let t = texts();
         if self.title != t.settings_title {
             self.title = t.settings_title;
@@ -3134,6 +3157,9 @@ enum MouseAt {
 impl SettingsApp {
     /// Re-reads the service's status twice a second.
     fn poll_network(&mut self) {
+        if self.shots.is_some() {
+            return;
+        }
         if self.net_read.elapsed() >= Duration::from_millis(500) {
             self.net_status = flock_net::read_status(crate::net::config_dir()).ok();
             self.net_read = Instant::now();
