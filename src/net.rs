@@ -40,7 +40,6 @@ extern "C" {
     fn CGEventGetDoubleValueField(event: Ref, field: u32) -> f64;
     fn CGEventGetFlags(event: Ref) -> u64;
     fn CGEventSourceFlagsState(state: i32) -> u64;
-    fn CGEventSourceKeyState(state: i32, key: u16) -> bool;
     fn CGEventSetFlags(event: Ref, flags: u64);
     fn CGEventSetIntegerValueField(event: Ref, field: u32, value: i64);
     fn CGEventCreateMouseEvent(source: Ref, kind: u32, point: Point, button: u32) -> Ref;
@@ -209,28 +208,6 @@ fn request_permissions() {
         }
     }
 }
-/// Where the settings window leaves key rules edited on a sub. The window is another
-/// process and cannot call the service; the network thread sends them to the master.
-fn key_rules_request_path() -> PathBuf {
-    Config::path().with_file_name("key-rules.request")
-}
-
-/// Asks the running app to send `keys` to the master (a sub's edit of "OS 전환 시").
-pub fn request_key_rules(keys: &std::collections::BTreeMap<String, flock_net::DirRules>) -> anyhow::Result<()> {
-    let path = key_rules_request_path();
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, serde_json::to_vec(keys)?)?;
-    std::fs::rename(tmp, path)?;
-    Ok(())
-}
-
-fn take_key_rules_request() -> Option<std::collections::BTreeMap<String, flock_net::DirRules>> {
-    let path = key_rules_request_path();
-    let bytes = std::fs::read(&path).ok()?;
-    let _ = std::fs::remove_file(&path);
-    serde_json::from_slice(&bytes).ok()
-}
-
 /// The running service and the config it runs with, for the edge watcher.
 struct Live {
     service: Arc<Service>,
@@ -392,6 +369,7 @@ pub fn spawn(shared: Arc<Shared>) -> JoinHandle<()> {
             let mut prompted = false;
             let mut permission_poll = Instant::now() - Duration::from_secs(2);
             let mut was_ready = permissions_ready();
+            let mut rules_retry = Instant::now() - Duration::from_secs(1);
             let mut retry = Instant::now() - Duration::from_secs(5);
             while !shared.stopped() {
                 shared.reload_if_edited();
@@ -403,15 +381,18 @@ pub fn spawn(shared: Arc<Shared>) -> JoinHandle<()> {
                     let _ = std::fs::remove_file(request);
                     request_permissions();
                 }
-                // Key rules edited on a sub go to its master (see `request_key_rules`).
-                if let Some(keys) = take_key_rules_request() {
-                    match &service {
-                        Some(s) => {
-                            if let Err(e) = s.send_key_rules(keys) {
-                                log::warn!("send key rules to the master: {e:#}");
+                // Reading is non-destructive. Only a matching master snapshot acknowledges
+                // the latest edit, so sharing off, disconnects and restarts retain it.
+                if rules_retry.elapsed() >= Duration::from_secs(1) {
+                    rules_retry = Instant::now();
+                    match crate::key_rules::pending(&Config::path(), &shared.config()) {
+                        Ok(Some(edit)) => {
+                            if let Some(s) = &service {
+                                if let Err(e) = s.send_key_rules(edit.keys) { log::warn!("send key rules: {e:#}"); }
                             }
                         }
-                        None => log::info!("key rules edited while sharing is off: kept on this computer only"),
+                        Ok(None) => {}
+                        Err(e) => log::warn!("read pending key rules: {e:#}"),
                     }
                 }
                 if config.on && permission_poll.elapsed() >= Duration::from_secs(2) {
@@ -473,17 +454,16 @@ pub fn spawn(shared: Arc<Shared>) -> JoinHandle<()> {
                                 }
                             }),
                             on_master_settings: Box::new(move |settings| {
-                                if let Err(e) = master.update_config(|c| {
-                                    settings.apply_to(&mut c.network);
+                                if let Err(e) = master.try_update_config(|c| {
+                                    crate::key_rules::apply_master(&Config::path(), c, &settings)?;
                                     apply_app_settings(c, &settings.app);
+                                    Ok(())
                                 }) {
                                     log::error!("save master settings: {e:#}");
                                 }
                             }),
-                            on_key_rules: Box::new(move |keys| {
-                                if let Err(e) = rules.update_config(|c| c.network.keys = keys) {
-                                    log::error!("save key rules: {e:#}");
-                                }
+                            persist_key_rules: Box::new(move |keys| {
+                                rules.update_config(|c| c.network.keys = keys.clone())
                             }),
                             ..flock_net::Hooks::default()
                         };
@@ -598,46 +578,30 @@ fn modifier_changes(previous: u64, flags: u64, key: u16, held: &mut [bool; 8]) -
     }
     events
 }
-/// How long after Caps Lock turned on a "turned off" still belongs to the same press.
-const CAPS_SAME_PRESS: Duration = Duration::from_millis(400);
-/// Real timing of the Caps Lock key for netcore (`caps_long_press`).
-/// macOS delivers Caps Lock to an event tap only as a `flagsChanged` flip of the alpha-shift
-/// flag, never as key down/up. A flip that starts a press sends Caps down at once; the up
-/// follows when the physical key is seen up (`poll`, fed by the HID key state) or, with
-/// macOS's "use Caps Lock to switch input source" (on at release, straight back off), at
-/// the off flip. That off belongs to the same press and must not start another one, or the
-/// receiver would switch twice. The tap swallows the event, but the hardware state can
-/// still flip below the event tap; that cannot be prevented here.
+/// Only raw HID edges define a press. Alpha-shift flips may be delayed until
+/// release by the input-source switcher and cannot tell two quick presses apart.
 #[derive(Default)]
-struct CapsPress {
-    /// Start of the press whose down was sent and whose up is still due.
-    down_since: Option<Instant>,
-    /// Last flip to on, for recognising the off of the same press after the up was sent.
-    on_since: Option<Instant>,
-}
+struct CapsPress { down: bool }
 impl CapsPress {
-    /// A flip of the Caps Lock state. Returns the key events to send now.
-    fn flip(&mut self, on: bool, now: Instant) -> Vec<bool> {
-        if self.down_since.take().is_some() {
-            return vec![false];
-        }
-        let same = !on
-            && self.on_since.take().is_some_and(|t| now.duration_since(t) < CAPS_SAME_PRESS);
-        if same {
-            return Vec::new();
-        }
-        if on {
-            self.on_since = Some(now);
-        }
-        self.down_since = Some(now);
-        vec![true]
-    }
-    /// Called every few ms with the physical key state. Sends the up once the key is up.
     fn poll(&mut self, key_down: bool) -> Option<bool> {
-        if key_down {
-            return None;
-        }
-        self.down_since.take().map(|_| false)
+        if self.down == key_down { return None; }
+        self.down = key_down;
+        Some(key_down)
+    }
+}
+extern "C" {
+    fn fs_caps_start(callback: unsafe extern "C" fn(Ref, bool, u64), context: Ref) -> Ref;
+    fn fs_caps_stop(handle: Ref);
+}
+struct CapsMonitor(Ref);
+impl Drop for CapsMonitor { fn drop(&mut self) { unsafe { fs_caps_stop(self.0); } } }
+unsafe extern "C" fn capture_caps(user: Ref, down: bool, age_ns: u64) {
+    let state = &mut *(user as *mut Capture);
+    if let Some(down) = state.caps.poll(down) {
+        let now = Instant::now();
+        let at = now.checked_sub(Duration::from_nanos(age_ns)).unwrap_or(now);
+        state.caps_times.lock().unwrap().push_back(at);
+        let _ = state.sink.send(InputEvent::Key { usage: 0x39, down });
     }
 }
 struct Capture {
@@ -645,6 +609,7 @@ struct Capture {
     flags: u64,
     held: [bool; 8],
     caps: CapsPress,
+    caps_times: Arc<Mutex<std::collections::VecDeque<Instant>>>,
     tap: Ref,
 }
 unsafe extern "C" fn capture(_: Ref, kind: u32, event: Ref, user: Ref) -> Ref {
@@ -677,7 +642,7 @@ unsafe extern "C" fn capture(_: Ref, kind: u32, event: Ref, user: Ref) -> Ref {
             button,
             down: kind == 25,
         }),
-        10 | 11 => keymap::mac_to_hid(field(9) as u16).map(|usage| InputEvent::Key {
+        10 | 11 => keymap::mac_to_hid(field(9) as u16).filter(|&usage| usage != 0x39).map(|usage| InputEvent::Key {
             usage,
             down: kind == 10,
         }),
@@ -686,14 +651,7 @@ unsafe extern "C" fn capture(_: Ref, kind: u32, event: Ref, user: Ref) -> Ref {
             for ev in modifier_changes(state.flags, flags, field(9) as u16, &mut state.held) {
                 let _ = state.sink.send(ev);
             }
-            if (state.flags ^ flags) & (1 << 16) != 0 {
-                let on = flags & (1 << 16) != 0;
-                let events = state.caps.flip(on, Instant::now());
-                log::debug!("caps lock {} (events: {events:?})", if on { "on" } else { "off" });
-                for down in events {
-                    let _ = state.sink.send(InputEvent::Key { usage: 0x39, down });
-                }
-            }
+            // Caps Lock is sent by the raw HID observer, independently of these flips.
             state.flags = flags;
             None
         }
@@ -733,6 +691,7 @@ struct MacPlatform {
     edges_allowed: AtomicBool,
     capture: Mutex<Option<CaptureThread>>,
     injection: Mutex<Injection>,
+    caps_times: Arc<Mutex<std::collections::VecDeque<Instant>>>,
 }
 impl Platform for MacPlatform {
     fn os(&self) -> Os {
@@ -797,6 +756,8 @@ impl Platform for MacPlatform {
         self.stop_capture();
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = stop.clone();
+        let caps_times = self.caps_times.clone();
+        caps_times.lock().unwrap().clear();
         let (tx, rx) = mpsc::sync_channel(1);
         let handle = thread::Builder::new()
             .name("network-input-tap".into())
@@ -806,6 +767,7 @@ impl Platform for MacPlatform {
                     flags: CGEventSourceFlagsState(0),
                     held: [false; 8],
                     caps: CapsPress::default(),
+                    caps_times,
                     tap: null_mut(),
                 });
                 let mask = [1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 22, 25, 26, 27]
@@ -825,6 +787,16 @@ impl Platform for MacPlatform {
                     let _ = tx.send(false);
                     return;
                 }
+                let caps_handle = fs_caps_start(capture_caps, (&mut *state as *mut Capture).cast());
+                if caps_handle.is_null() {
+                    log::error!("cannot observe raw Caps Lock input");
+                    CFMachPortInvalidate(tap);
+                    CFRelease(source);
+                    CFRelease(tap);
+                    let _ = tx.send(false);
+                    return;
+                }
+                let caps_monitor = CapsMonitor(caps_handle);
                 CFRunLoopAddSource(CFRunLoopGetCurrent(), source, kCFRunLoopDefaultMode);
                 CGEventTapEnable(tap, true);
                 CGAssociateMouseAndMouseCursorPosition(0);
@@ -842,17 +814,9 @@ impl Platform for MacPlatform {
                 let _ = tx.send(true);
                 while !stopping.load(Ordering::Acquire) {
                     CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.01, false);
-                    if state.caps.down_since.is_some() {
-                        // 1 = HID system state: the physical key, not the tap's view.
-                        let held = CGEventSourceKeyState(1, 0x39);
-                        if let Some(down) = state.caps.poll(held) {
-                            let _ = state.sink.send(InputEvent::Key { usage: 0x39, down });
-                        }
-                    }
                 }
-                if state.caps.poll(false).is_some() {
-                    let _ = state.sink.send(InputEvent::Key { usage: 0x39, down: false });
-                }
+                drop(caps_monitor);
+                capture_caps((&mut *state as *mut Capture).cast(), false, 0);
                 CGEventTapEnable(tap, false);
                 CFMachPortInvalidate(tap);
                 CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, kCFRunLoopDefaultMode);
@@ -869,6 +833,11 @@ impl Platform for MacPlatform {
             relaunch_after_tap_failure();
             anyhow::bail!("Cannot create input event tap")
         }
+    }
+    fn captured_at(&self, event: &InputEvent) -> Option<Instant> {
+        if matches!(event, InputEvent::Key { usage: 0x39, .. }) {
+            self.caps_times.lock().unwrap().pop_front()
+        } else { None }
     }
     fn stop_capture(&self) {
         if let Some(capture) = self.capture.lock().unwrap().take() {
@@ -1066,32 +1035,53 @@ mod tests {
         );
     }
     #[test]
-    fn caps_is_a_toggle_and_scroll_keeps_fractions() {
-        assert!(modifier_changes(0, 1 << 16, 0x39, &mut [false; 8]).is_empty());
-        let t = Instant::now();
+    fn caps_physical_down_starts_before_the_input_source_release_flip() {
         let mut caps = CapsPress::default();
-        let ms = Duration::from_millis;
-        // Press held 120 ms (plain Caps Lock): down at the flip, up when the key is up.
-        assert_eq!(caps.flip(true, t), vec![true]);
+        assert_eq!(caps.poll(true), Some(true));
+        // Holding the physical key must keep it down even before flagsChanged arrives.
         assert_eq!(caps.poll(true), None);
         assert_eq!(caps.poll(false), Some(false));
-        assert_eq!(caps.poll(false), None);
-        // Plain Caps Lock turning off at the next press starts a new press.
-        assert_eq!(caps.flip(false, t + ms(2000)), vec![true]);
-        assert_eq!(caps.poll(false), Some(false));
-        // Input-source switching: on and straight back off within one short press.
-        assert_eq!(caps.flip(true, t + ms(3000)), vec![true]);
-        assert_eq!(caps.flip(false, t + ms(3120)), vec![false]);
-        // The same, when the poll already sent the up before the off flip.
-        assert_eq!(caps.flip(true, t + ms(4000)), vec![true]);
-        assert_eq!(caps.poll(false), Some(false));
-        assert!(caps.flip(false, t + ms(4150)).is_empty());
-        // Press held 700 ms: no up while the key stays down, flip off ends it.
-        assert_eq!(caps.flip(true, t + ms(5000)), vec![true]);
-        for _ in 0..70 {
-            assert_eq!(caps.poll(true), None);
+    }
+
+    #[test]
+    fn caps_two_rapid_physical_presses_are_both_forwarded() {
+        let mut caps = CapsPress::default();
+        for _ in 0..2 {
+            assert_eq!(caps.poll(true), Some(true));
+            assert_eq!(caps.poll(false), Some(false));
         }
-        assert_eq!(caps.flip(false, t + ms(5700)), vec![false]);
+    }
+
+    #[test]
+    fn raw_caps_timestamps_preserve_a_long_hold_when_delivery_is_batched() {
+        let platform = MacPlatform::default();
+        let (sink, input) = mpsc::channel();
+        let mut capture = Capture { sink, flags: 0, held: [false; 8], caps: CapsPress::default(),
+            caps_times: platform.caps_times.clone(), tap: null_mut() };
+        let user = (&mut capture as *mut Capture).cast();
+        unsafe {
+            capture_caps(user, true, 700_000_000);
+            capture_caps(user, false, 0);
+        }
+        let down = input.try_recv().unwrap();
+        let up = input.try_recv().unwrap();
+        assert_eq!(down, InputEvent::Key { usage: 0x39, down: true });
+        assert_eq!(up, InputEvent::Key { usage: 0x39, down: false });
+        let start = platform.captured_at(&down).unwrap();
+        let end = platform.captured_at(&up).unwrap();
+        assert!(end.duration_since(start) >= Duration::from_millis(700));
+        assert!(platform.caps_times.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn caps_is_a_toggle_and_scroll_keeps_fractions() {
+        assert!(modifier_changes(0, 1 << 16, 0x39, &mut [false; 8]).is_empty());
+        let mut caps = CapsPress::default();
+        assert_eq!(caps.poll(false), None);
+        assert_eq!(caps.poll(true), Some(true));
+        for _ in 0..70 { assert_eq!(caps.poll(true), None); }
+        assert_eq!(caps.poll(false), Some(false));
+        assert_eq!(caps.poll(false), None);
         let mut remainder = 0.0;
         assert_eq!(scroll_pixels(&mut remainder, 0.04), 0);
         assert_eq!(scroll_pixels(&mut remainder, 0.08), 1);

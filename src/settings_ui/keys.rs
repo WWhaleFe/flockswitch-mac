@@ -277,12 +277,13 @@ impl SettingsApp {
 
     /// Saves one change to the rules. A sub also sends the rules to its master.
     fn edit_key_rules(&mut self, src: Os, dst: Os, edit: KeyEdit) {
-        self.apply(|c| logic::edit_keys(&mut c.network, src, dst, edit));
-        if self.follows_master() {
-            let keys = self.cfg.network.keys.clone();
-            if let Err(e) = crate::net::request_key_rules(&keys) {
-                self.error = Some(format!("{e:#}"));
-            }
+        match Config::update(|c| {
+            logic::edit_keys(&mut c.network, src, dst, edit);
+            c.validate()?;
+            crate::key_rules::queue(&Config::path(), c)
+        }) {
+            Ok(cfg) => { self.cfg = cfg; self.error = None; }
+            Err(e) => self.error = Some(format!("{e:#}")),
         }
     }
 

@@ -314,15 +314,16 @@ impl Shared {
     /// Applies a change, validates it, saves it, and tells the engine. On error nothing
     /// changes, so the UI can simply redraw from the current config.
     pub fn update_config(&self, change: impl FnOnce(&mut Config)) -> Result<()> {
+        self.try_update_config(|next| { change(next); Ok(()) })
+    }
+
+    pub fn try_update_config(&self, change: impl FnOnce(&mut Config) -> Result<()>) -> Result<()> {
         let mut current = self.config.lock().unwrap();
-        let mut next = current.clone();
-        change(&mut next);
-        next.resolve_edge_owner(&current);
-        next.validate()?;
-        next.save()?;
+        let next = Config::update(change)?;
         crate::i18n::set_language(&next.language);
         *current = next;
-        *self.config_mtime.lock().unwrap() = config_mtime();
+        // Force one fresh read: another process may have saved just after our transaction.
+        *self.config_mtime.lock().unwrap() = None;
         self.version.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -334,26 +335,14 @@ impl Shared {
         if now.is_none() || now == *self.config_mtime.lock().unwrap() {
             return;
         }
-        // Read and parse without holding any lock.
-        let parsed = std::fs::read_to_string(Config::path())
-            .map_err(anyhow::Error::from)
-            .and_then(|t| Config::parse(&t))
-            .and_then(|c| c.validate().map(|_| c));
-        // Lock order: config, then config_mtime - the same as update_config.
+        // Lock order: memory config, then its mtime, then the file transaction.
         let mut current = self.config.lock().unwrap();
         let mut seen = self.config_mtime.lock().unwrap();
-        if now == *seen {
-            return; // our own save raced with this check
-        }
+        if now == *seen { return; }
+        let parsed = Config::update(|cfg| { cfg.resolve_edge_owner(&current); Ok(()) });
         *seen = now;
         match parsed {
-            Ok(mut cfg) => {
-                let edges_on = cfg.edges.on;
-                cfg.resolve_edge_owner(&current);
-                if cfg.edges.on != edges_on {
-                    if let Err(e) = cfg.save() { log::warn!("save edge ownership: {e:#}"); }
-                    *seen = config_mtime();
-                }
+            Ok(cfg) => {
                 crate::i18n::set_language(&cfg.language);
                 *current = cfg;
                 self.version.fetch_add(1, Ordering::SeqCst);

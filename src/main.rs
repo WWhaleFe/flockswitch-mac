@@ -4,6 +4,8 @@
 mod backup;
 mod ble;
 mod config;
+mod file_io;
+mod key_rules;
 mod device;
 mod edge;
 mod engine;
@@ -212,9 +214,7 @@ fn real_main(args: &[String]) -> Result<()> {
             let (Some(key), Some(value)) = (args.get(1), args.get(2)) else {
                 bail!("usage: flockswitch set <key> <value>  (see 'flockswitch help')");
             };
-            let mut cfg = Config::load_or_create()?;
-            cfg.set(key, value)?;
-            cfg.save()?;
+            Config::update(|cfg| cfg.set(key, value))?;
             println!("{key} = {value}  ({})", Config::path().display());
             Ok(())
         }
@@ -291,10 +291,10 @@ fn load_config() -> Config {
             let path = Config::path();
             let backup = path.with_file_name("config.invalid.toml");
             log::warn!("{e:#}; using defaults (your file is kept as {})", backup.display());
-            let _ = std::fs::rename(&path, &backup);
-            let cfg = Config::default();
-            let _ = cfg.save();
-            cfg
+            Config::recover_invalid().unwrap_or_else(|e| {
+                log::warn!("cannot recover settings: {e:#}");
+                Config::default()
+            })
         }
     }
 }

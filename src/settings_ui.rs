@@ -699,11 +699,8 @@ impl SettingsApp {
 
     /// Applies one change on top of the file's current content, validates, saves.
     fn apply(&mut self, change: impl FnOnce(&mut Config)) {
-        let mut next = Config::load_or_create().unwrap_or_else(|_| self.cfg.clone());
-        change(&mut next);
-        next.resolve_edge_owner(&self.cfg);
-        match next.validate().and_then(|_| next.save()) {
-            Ok(()) => {
+        match Config::update(|next| { change(next); Ok(()) }) {
+            Ok(next) => {
                 crate::i18n::set_language(&next.language);
                 self.cfg = next;
                 self.error = None;
