@@ -20,9 +20,9 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const RELEASES_API: &str = "https://api.github.com/repos/WWhaleFe/flockswitch-mac/releases/latest";
-pub const RELEASES_PAGE: &str = "https://github.com/WWhaleFe/flockswitch-mac/releases/latest";
-pub const ISSUES_PAGE: &str = "https://github.com/WWhaleFe/flockswitch-mac/issues/new/choose";
+const RELEASES_API: &str = "https://api.github.com/repos/WWhaleFe/flockswitch2/releases/latest";
+pub const RELEASES_PAGE: &str = "https://github.com/WWhaleFe/flockswitch2/releases/latest";
+pub const ISSUES_PAGE: &str = "https://github.com/WWhaleFe/flockswitch2/issues/new/choose";
 pub const REPORT_EMAIL: &str = "feedback.wwhale@gmail.com";
 /// How often the running app looks for a new version (plus once shortly after start).
 pub const CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
@@ -527,28 +527,18 @@ pub fn open_url(url: &str) {
 
 /// The start of a report: room to write, then what helps to find the cause. Only
 /// what the user can see in the mail before sending it.
-pub fn report_body(cfg: &crate::config::Config, devices: &[crate::shared::DeviceInfo], master: Option<&str>) -> String {
-    use crate::config::{button_name, BUTTONS};
-    let mut s = String::from("\n\n\n---- flockswitch ----\n");
+pub fn report_body(cfg: &crate::config::Config) -> String {
+    let mut s = String::from("\n\n\n---- flockswitch2 ----\n");
     s += &format!("version: {}\n", env!("CARGO_PKG_VERSION"));
     s += &format!("system: {} {}\n", os_version(), std::env::consts::ARCH);
-    s += &format!("master mouse: {} (setting: {})\n", master.unwrap_or("not here"), cfg.trigger_device);
-    for cid in BUTTONS {
-        let b = cfg.button(cid);
-        if b.on {
-            s += &format!("button {}: channels {:?}", button_name(cid), b.channels);
-            for (name, m) in [("up", &b.moves.up), ("down", &b.moves.down), ("left", &b.moves.left), ("right", &b.moves.right)] {
-                if m.on {
-                    s += &format!(", {name} {:?}", m.channels);
-                }
-            }
-            s += "\n";
-        }
-    }
-    for d in devices {
-        let here = if d.online { "" } else { ", on another computer" };
-        s += &format!("device: {} [{}] {}{here}\n", d.name, d.key, d.kind);
-    }
+    let n = &cfg.network;
+    s += &format!(
+        "network: {}, {:?}, {} computers, crossing delay {} ms\n",
+        if n.on { "on" } else { "off" },
+        n.role,
+        n.peers.len(),
+        n.cross_delay_ms
+    );
     s
 }
 

@@ -1,5 +1,5 @@
 //! Saving the settings to a file and loading them again, to move a setup to another
-//! computer. The files live in Documents/flockswitch, where they are easy to find and
+//! computer. The files live in Documents/flockswitch2, where they are easy to find and
 //! copy; they hold the settings file as it is (same TOML in every port: macOS, Windows,
 //! Linux) after a comment saying where it came from. A file from another computer may
 //! have settings this one does not know; those are left out, not refused.
@@ -58,12 +58,12 @@ pub enum Removed {
     Deleted,
 }
 
-/// Documents/flockswitch.
+/// Documents/flockswitch2.
 pub fn folder() -> PathBuf {
     dirs::document_dir()
         .or_else(|| dirs::home_dir().map(|h| h.join("Documents")))
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("flockswitch")
+        .join("flockswitch2")
 }
 
 /// A settings file found in the folder.
