@@ -1296,9 +1296,7 @@ impl SettingsApp {
         }
         let keys: Vec<(ShakeKey, &str)> = SHAKE_KEYS.into_iter().zip(t.shake_key_names).collect();
         let mut key = self.cfg.locate.shake_key;
-        if labeled_row(ui, p, t.locate_shake_key, width, ROW_SMALL, |ui| {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| combo(ui, "shake-key", &mut key, &keys)).inner
-        }) {
+        if labeled_row(ui, p, t.locate_shake_key, width, ROW_SMALL, |ui| segmented(ui, p, "shake-key", &mut key, &keys, SEG_SMALL)) {
             self.apply(|c| c.locate.shake_key = key);
         }
     }
