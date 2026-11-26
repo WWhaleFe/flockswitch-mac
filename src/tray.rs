@@ -5,6 +5,7 @@
 use crate::engine::Engine;
 use crate::i18n::{texts, Texts};
 use crate::icon;
+use crate::net::NetState;
 use crate::shared::{Shared, Status};
 use anyhow::Result;
 use auto_launch::{AutoLaunch, AutoLaunchBuilder, MacOSLaunchMode};
@@ -20,6 +21,7 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder, TrayIconEvent};
 #[derive(Clone)]
 enum Action {
     Enabled,
+    Channel(u8),
     Settings,
     CheckUpdate,
     InstallUpdate,
@@ -33,7 +35,7 @@ struct Ui {
     shared: Arc<Shared>,
     tray: Option<TrayIcon>,
     actions: HashMap<MenuId, Action>,
-    shown: (Status, u64),
+    shown: (Status, NetState, u64),
     uninstall_requested: bool,
     shortcuts: Option<crate::hotkey::Shortcuts>,
 }
@@ -46,6 +48,7 @@ pub fn run(shared: Arc<Shared>) -> Result<()> {
     spawn_update_check(shared.clone());
     spawn_replacement_watch(shared.clone());
     crate::edge::spawn(shared.clone());
+    let mut network = Some(crate::net::spawn(shared.clone()));
 
     let mut event_loop = EventLoopBuilder::new().build();
     // Menu-bar only: no Dock icon, no app switcher entry.
@@ -58,7 +61,7 @@ pub fn run(shared: Arc<Shared>) -> Result<()> {
         shared: shared.clone(),
         tray: None,
         actions: HashMap::new(),
-        shown: (Status::default(), u64::MAX),
+        shown: (Status::default(), NetState::Off, u64::MAX),
         uninstall_requested: false,
         shortcuts: None,
     };
@@ -112,6 +115,9 @@ pub fn run(shared: Arc<Shared>) -> Result<()> {
         let destroyed = matches!(event, Event::LoopDestroyed);
         if shared.stopped() || destroyed {
             shared.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            if let Some(h) = network.take() {
+                let _ = h.join();
+            }
             if let Some(h) = engine.take() {
                 join_briefly(h); // lets the engine hand the button back first
             }
@@ -124,7 +130,7 @@ pub fn run(shared: Arc<Shared>) -> Result<()> {
         }
 
         // Redraw when the engine found/lost devices or switched.
-        let now = (shared.status(), shared.version());
+        let now = (shared.status(), NetState::of(&shared.config(), crate::net::live_status().as_ref()), shared.version());
         if ui.tray.is_some() && now != ui.shown {
             ui.refresh();
         }
@@ -171,7 +177,7 @@ fn spawn_engine(shared: Arc<Shared>) -> JoinHandle<()> {
 pub fn autostart() -> Option<AutoLaunch> {
     let exe = std::env::current_exe().ok()?;
     AutoLaunchBuilder::new()
-        .set_app_name("flockswitch")
+        .set_app_name(crate::APP_NAME)
         .set_app_path(&exe.to_string_lossy())
         .set_macos_launch_mode(MacOSLaunchMode::LaunchAgent)
         .build()
@@ -192,11 +198,11 @@ impl Ui {
         TrayIconEvent::set_event_handler(Some(|_| {}));
         let menu = self.build_menu();
         let cfg = self.shared.config();
-        let builder = TrayIconBuilder::new().with_menu(Box::new(menu)).with_tooltip("flockswitch");
+        let builder = TrayIconBuilder::new().with_menu(Box::new(menu)).with_tooltip(crate::APP_NAME);
         let builder = builder.with_icon_templated(tray_icon(cfg.enabled)?);
         let tray = builder.build()?;
         self.tray = Some(tray);
-        self.shown = (self.shared.status(), self.shared.version());
+        self.shown = (self.shared.status(), NetState::of(&self.shared.config(), crate::net::live_status().as_ref()), self.shared.version());
         Ok(())
     }
 
@@ -209,7 +215,7 @@ impl Ui {
                 let _ = tray.set_icon_templated(Some(icon));
             }
         }
-        self.shown = (self.shared.status(), self.shared.version());
+        self.shown = (self.shared.status(), NetState::of(&self.shared.config(), crate::net::live_status().as_ref()), self.shared.version());
     }
 
     fn check(&mut self, text: impl AsRef<str>, checked: bool, enabled: bool, action: Action) -> CheckMenuItem {
@@ -230,11 +236,13 @@ impl Ui {
         let cfg = self.shared.config();
         let st = self.shared.status();
         let menu = Menu::new();
+        let state = NetState::of(&cfg, crate::net::live_status().as_ref());
+        let _ = menu.append(&MenuItem::new(state.text(t), false, None));
 
         let status = if !cfg.enabled {
             format!("○ {}", t.paused)
         } else if let Some(trigger) = &st.trigger {
-            format!("● {} — {trigger}", t.running)
+            format!("● {} - {trigger}", t.running)
         } else {
             format!("◌ {}", t.searching)
         };
@@ -248,6 +256,13 @@ impl Ui {
         let _ = menu.append(&enabled);
         // Everything else lives in the settings window, which stays open while you
         // change things (a native menu closes after every click).
+        for channel in 1..=3 {
+            let item = self.item(format!("{} {channel}", t.channel), Action::Channel(channel));
+            let _ = menu.append(&item);
+        }
+        for device in &st.devices {
+            let _ = menu.append(&MenuItem::new(format!("{}: {}", t.section_devices, device.name), false, None));
+        }
         let settings = self.item(t.settings, Action::Settings);
         let _ = menu.append(&settings);
         let report = self.item(t.menu_report, Action::Report);
@@ -264,7 +279,7 @@ impl Ui {
             U::Available(r) | U::Downloading(r) | U::Installing(r) => {
                 Some((format!("● {} {}", t.update_available, r.version), false))
             }
-            U::UpdateFailed(r, _) => Some((format!("● {} {} — {}", t.update_available, r.version, t.update_install_failed), false)),
+            U::UpdateFailed(r, _) => Some((format!("● {} {} - {}", t.update_available, r.version, t.update_install_failed), false)),
             U::Downloaded(_) => Some((format!("✓ {}", t.update_downloaded), false)),
             U::Installed(_) => Some((format!("✓ {}", t.update_installed), false)),
             U::Failed => Some((t.menu_check_failed.to_string(), true)),
@@ -303,6 +318,7 @@ impl Ui {
     fn handle(&mut self, action: Action) -> bool {
         match action {
             Action::Quit => return true,
+            Action::Channel(channel) => self.shared.request_switch(channel),
             Action::Enabled => {
                 if let Err(e) = self.shared.update_config(|c| c.enabled = !c.enabled) {
                     log::info!("setting not changed: {e:#}");
@@ -337,8 +353,7 @@ impl Ui {
                 crate::update::open_url(&page);
             }
             Action::Report => {
-                let st = self.shared.status();
-                let body = crate::update::report_body(&self.shared.config(), &st.devices, st.trigger.as_deref());
+                let body = crate::update::report_body(&self.shared.config());
                 crate::update::open_url(&crate::update::report_mailto(texts().report_subject, &body));
             }
         }

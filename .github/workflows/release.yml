@@ -29,15 +29,50 @@ jobs:
           done
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --locked
+      - run: cargo test --locked --manifest-path netcore/Cargo.toml
       - run: cargo build --release --locked
+      - name: Import fixed signing identity
+        env:
+          MAC_SIGN_P12: ${{ secrets.MAC_SIGN_P12 }}
+          MAC_SIGN_P12_PASSWORD: ${{ secrets.MAC_SIGN_P12_PASSWORD }}
+        run: |
+          if [ -z "$MAC_SIGN_P12" ] || [ -z "$MAC_SIGN_P12_PASSWORD" ]; then
+            if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+              echo "MAC_SIGN_P12 and MAC_SIGN_P12_PASSWORD are required for tagged releases" >&2
+              exit 1
+            fi
+            exit 0
+          fi
+          keychain="$RUNNER_TEMP/flockswitch-signing.keychain-db"
+          p12="$RUNNER_TEMP/flockswitch-signing.p12"
+          password=$(openssl rand -hex 32)
+          printf '%s' "$MAC_SIGN_P12" | base64 --decode > "$p12"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$p12" -k "$keychain" -P "$MAC_SIGN_P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain"
+          security list-keychains -d user -s "$keychain" "$HOME/Library/Keychains/login.keychain-db"
+          identity=$(security find-identity -p codesigning "$keychain" | awk '/[0-9A-F]{40}/ {print $2; exit}')
+          if [ -z "$identity" ]; then echo "No signing identity in MAC_SIGN_P12" >&2; exit 1; fi
+          echo "FLOCK_SIGN_ID=$identity" >> "$GITHUB_ENV"
+          rm -f "$p12"
       - name: Build flockswitch.app and zip it
         # ditto keeps the bundle's code signature and executable bits, which a plain
         # artifact upload would lose.
         run: |
           mkdir -p out/flockswitch
           packaging/macos/make-app.sh target/release/flockswitch out/flockswitch
-          cp LICENSE README.md README.ko.md out/flockswitch/
+          cp LICENSE README.md README.ko.md PRIVACY.md out/flockswitch/
+          codesign --verify --strict out/flockswitch/flockswitch.app
           ditto -c -k --keepParent out/flockswitch flockswitch-macos.zip
+      - name: Remove temporary signing material
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/flockswitch-signing.p12"
+          if [ -f "$RUNNER_TEMP/flockswitch-signing.keychain-db" ]; then
+            security delete-keychain "$RUNNER_TEMP/flockswitch-signing.keychain-db"
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: flockswitch-macos-arm64
@@ -59,7 +94,7 @@ jobs:
       - name: Release notes from CHANGELOG.ko.md and CHANGELOG.md
         run: |
           version="${GITHUB_REF_NAME#v}"
-          # The lines under "## <version> — <date>", up to the next "## ".
+          # The lines under "## <version> - <date>", up to the next "## ".
           section() {
             awk -v v="$version" '
               /^## / { if (found) exit; if (index($0, "## " v " ") == 1) { found = 1; next } }
@@ -92,4 +127,5 @@ jobs:
           # --generate-notes adds GitHub's "Full Changelog" link after notes.md.
           gh release create "$GITHUB_REF_NAME" flockswitch-*.zip SHA256SUMS.txt \
             --repo "$GITHUB_REPOSITORY" --title "flockswitch $GITHUB_REF_NAME" \
-            --notes-file notes.md --generate-notes
+            --notes-file notes.md --generate-notes \
+            $(case "$GITHUB_REF_NAME" in *-*) echo --prerelease;; esac)

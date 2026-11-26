@@ -14,6 +14,8 @@
   <!-- Menu-bar only: no Dock icon, no app switcher entry. -->
   <key>LSUIElement</key><true/>
   <key>NSBluetoothAlwaysUsageDescription</key><string>flockswitch uses Bluetooth to detect and switch your Logitech mouse and keyboard.</string>
+  <key>NSLocalNetworkUsageDescription</key><string>flockswitch finds and connects to your other computers on the local network to share the mouse and keyboard.</string>
+  <key>NSBonjourServices</key><array><string>_flockswitch._tcp</string></array>
   <key>NSHumanReadableCopyright</key><string>Copyright (c) 2026 WWhaleFe. MIT License.</string>
 </dict>
 </plist>

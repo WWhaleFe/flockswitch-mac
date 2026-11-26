@@ -1,4 +1,4 @@
-//! flockswitch — use a spare Logitech mouse button as an Easy-Switch key that moves the
+//! flockswitch - use a spare Logitech mouse button as an Easy-Switch key that moves the
 //! mouse and its companion keyboard to another computer together.
 
 mod backup;
@@ -10,6 +10,7 @@ mod engine;
 mod hidpp;
 mod hotkey;
 mod i18n;
+mod net;
 mod icon;
 mod overlay;
 mod settings_ui;
@@ -26,7 +27,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 const USAGE: &str = "\
-flockswitch — move your Logitech mouse and keyboard to another computer with one button
+flockswitch - move your Logitech mouse and keyboard to another computer with one button
 
 USAGE:
     flockswitch              start in the menu bar / notification area (default)
@@ -46,6 +47,9 @@ USAGE:
                               set gesture.channels 3           one button: wheel_mode / gesture / middle
                               set follow all        devices that move along (all, none, or B366,MX Keys)
                               set trigger_device auto
+                              set network.on true             share over the network
+                              set network.name \"My Mac\"      this computer's name
+                              set network.port 47160          the port
                               set enabled true|false
                               set keep_wheel_mode true         put the wheel back (ratchet or free) when the
                                                     mouse comes back (with the wheel_mode button)
@@ -89,12 +93,21 @@ Set RUST_LOG=debug for more detail.";
 
 /// Port used only as a lock so two copies never react to the same button press.
 const INSTANCE_PORT: u16 = 47_851;
+/// The program's name: login item, tray tooltip, settings header.
+pub const APP_NAME: &str = "flockswitch";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     // The long-running modes take the single-instance lock before touching the log, so
     // a second copy does not wipe the running copy's log file.
-    let tray_mode = args.is_empty() || args[0] == "tray";
+    let recovery = args.first().is_some_and(|s| s == "recover-tray");
+    if recovery {
+        for _ in 0..50 {
+            if !main_instance_running() { break; }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+    let tray_mode = args.is_empty() || args[0] == "tray" || recovery;
     let _lock = if tray_mode || args[0] == "run" {
         match single_instance() {
             Some(lock) => Some(lock),
@@ -138,7 +151,7 @@ fn main() {
 fn real_main(args: &[String]) -> Result<()> {
     let cmd = args.first().map(String::as_str).unwrap_or("tray");
     match cmd {
-        "tray" => tray::run(Arc::new(Shared::new(load_config()))),
+        "tray" | "recover-tray" => tray::run(Arc::new(Shared::new(load_config()))),
         "run" => run_headless(),
         "settings" => {
             // One settings window at a time. Opening it again knocks on the open
@@ -220,7 +233,11 @@ fn run_headless() -> Result<()> {
     let s = shared.clone();
     ctrlc::set_handler(move || s.stop.store(true, Ordering::SeqCst))?;
     edge::spawn(shared.clone());
-    Engine::new(shared)?.run()
+    let network = net::spawn(shared.clone());
+    let result = Engine::new(shared.clone()).and_then(|mut engine| engine.run());
+    shared.stop.store(true, Ordering::SeqCst);
+    let _ = network.join();
+    result
 }
 
 fn list() -> Result<()> {

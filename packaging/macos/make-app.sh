@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Builds flockswitch.app around a compiled binary.
 #   packaging/macos/make-app.sh <binary> <out-dir>
-# The version comes from Cargo.toml. The bundle is ad-hoc signed (no Apple developer
-# certificate), so Gatekeeper asks once before the first launch.
+# The version comes from Cargo.toml. The bundle is signed with the fixed self-signed identity (sign-app.sh), so
+# permission grants survive updates; Gatekeeper still asks once before the first launch.
 set -euo pipefail
 
 bin="$1"
@@ -21,5 +21,5 @@ iconset="$(mktemp -d)/AppIcon.iconset"
 iconutil -c icns "$iconset" -o "$app/Contents/Resources/AppIcon.icns"
 rm -rf "$(dirname "$iconset")"
 
-codesign --force --sign - "$app"
+bash "$root/packaging/macos/sign-app.sh" "$app"
 echo "$app ($version)"

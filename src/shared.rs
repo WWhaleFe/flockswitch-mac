@@ -313,6 +313,7 @@ impl Shared {
         let mut current = self.config.lock().unwrap();
         let mut next = current.clone();
         change(&mut next);
+        next.resolve_edge_owner(&current);
         next.validate()?;
         next.save()?;
         crate::i18n::set_language(&next.language);
@@ -334,7 +335,7 @@ impl Shared {
             .map_err(anyhow::Error::from)
             .and_then(|t| Config::parse(&t))
             .and_then(|c| c.validate().map(|_| c));
-        // Lock order: config, then config_mtime — the same as update_config.
+        // Lock order: config, then config_mtime - the same as update_config.
         let mut current = self.config.lock().unwrap();
         let mut seen = self.config_mtime.lock().unwrap();
         if now == *seen {
@@ -342,7 +343,13 @@ impl Shared {
         }
         *seen = now;
         match parsed {
-            Ok(cfg) => {
+            Ok(mut cfg) => {
+                let edges_on = cfg.edges.on;
+                cfg.resolve_edge_owner(&current);
+                if cfg.edges.on != edges_on {
+                    if let Err(e) = cfg.save() { log::warn!("save edge ownership: {e:#}"); }
+                    *seen = config_mtime();
+                }
                 crate::i18n::set_language(&cfg.language);
                 *current = cfg;
                 self.version.fetch_add(1, Ordering::SeqCst);
