@@ -438,6 +438,9 @@ pub struct MeStatus {
     pub name: String,
     pub port: u16,
     pub error: Option<String>,
+    /// Whether the master lets this computer drive the others (true without group info).
+    #[serde(default = "enabled_by_default")]
+    pub can_send: bool,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DiscoveredStatus {
@@ -450,6 +453,11 @@ pub struct DiscoveredStatus {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PeerStatus {
     pub id: String,
+    /// The computer's name and system, also for a sub known only through the master.
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub os: Option<Os>,
     pub connected: bool,
     pub rtt_ms: Option<f64>,
     #[serde(default = "layout::yes")]
@@ -457,6 +465,9 @@ pub struct PeerStatus {
     /// Known only through the master's roster (a sub-to-sub link).
     #[serde(default)]
     pub via_master: bool,
+    /// The connected peer understands key rule edits (a 2.0 master silently ignores them).
+    #[serde(default)]
+    pub keyrules: bool,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StateStatus {

@@ -439,7 +439,10 @@ pub fn spawn(shared: Arc<Shared>) -> JoinHandle<()> {
                             }),
                             on_unpaired: Box::new(move |id| {
                                 if let Err(e) = unpaired
-                                    .update_config(|c| c.network.peers.retain(|p| p.id != id))
+                                    .update_config(|c| {
+                                        c.network.peers.retain(|p| p.id != id);
+                                        c.network.layout.retain(|cell| cell.id != id);
+                                    })
                                 {
                                     log::error!("save unpaired computer: {e:#}");
                                 }
@@ -484,6 +487,7 @@ pub fn spawn(shared: Arc<Shared>) -> JoinHandle<()> {
                                         name: config.name.clone(),
                                         port: config.port,
                                         error: Some(format!("{e:#}")),
+                                        can_send: true,
                                     },
                                     discovered: vec![],
                                     peers: vec![],
@@ -683,7 +687,6 @@ unsafe extern "C" fn capture(_: Ref, kind: u32, event: Ref, user: Ref) -> Ref {
 struct Injection {
     buttons: [bool; 5],
     modifiers: [bool; 8],
-    caps: bool,
     scroll: (f64, f64),
     clicks: [Option<(Instant, f64, f64, i64)>; 5],
     click_counts: [i64; 5],
@@ -917,9 +920,6 @@ impl Platform for MacPlatform {
                     if (0xe0..=0xe7).contains(&usage) {
                         s.modifiers[(usage - 0xe0) as usize] = down;
                     }
-                    if usage == 0x39 && down {
-                        s.caps = !s.caps;
-                    }
                     CGEventCreateKeyboardEvent(null_mut(), key, down)
                 }
             }
@@ -931,10 +931,7 @@ impl Platform for MacPlatform {
                     .iter()
                     .zip(MODIFIERS)
                     .filter(|(held, _)| **held)
-                    .fold(
-                        if s.caps { 1 << 16 } else { 0 },
-                        |f, (_, (_, bit, group))| f | bit | group,
-                    );
+                    .fold(0, |f, (_, (_, bit, group))| f | bit | group);
                 CGEventSetFlags(event, flags);
                 CGEventPost(0, event);
                 CFRelease(event);
@@ -1156,7 +1153,7 @@ mod tests {
         config.network.peers.push(flock_net::PeerConfig { id: "p1".into(), name: "Laptop".into(), ..Default::default() });
         let status = |mode: &str, peer: Option<&str>| flock_net::Status {
             running: true,
-            me: flock_net::MeStatus { id: String::new(), name: String::new(), port: 0, error: None },
+            me: flock_net::MeStatus { id: String::new(), name: String::new(), port: 0, error: None, can_send: true },
             discovered: vec![],
             peers: vec![],
             state: flock_net::StateStatus { mode: mode.into(), peer: peer.map(Into::into) },

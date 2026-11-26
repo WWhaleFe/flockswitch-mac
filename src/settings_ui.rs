@@ -1785,7 +1785,7 @@ impl SettingsApp {
             let file = picker.files[i].clone();
             match backup::read(&file.path) {
                 Ok(cfg) => {
-                    self.apply(|c| *c = cfg);
+                    self.apply(|c| *c = backup::restore(c, cfg));
                     match self.error.take() {
                         None => {
                             log::info!("settings loaded from {}", file.path.display());
