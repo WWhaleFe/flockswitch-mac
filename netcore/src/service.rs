@@ -713,6 +713,10 @@ impl Control {
             self.armed.clear();
             self.pairing = None;
         }
+        if config.on && config.share_clipboard && !config.receive_clipboard {
+            self.file_jobs.cancel_direction(1);
+            if let Some((_, incoming)) = self.incoming.take() { incoming.abandon(); }
+        }
         if !config.on || !config.share_clipboard {
             if self.file_jobs.busy() || self.outgoing.is_some() || self.incoming.is_some() {
                 self.fail_running_transfer();
@@ -1096,7 +1100,7 @@ impl Control {
                         }
                     }
                     Msg::Clipboard { text } => {
-                        if self.config.share_clipboard {
+                        if self.config.receives_clipboard() {
                             if self.file_jobs.cancel_direction(1) { self.fail_running_transfer(); }
                             self.drop_stale_sends();
                             if let Some((_, old)) = self.incoming.take() { old.abandon(); }
@@ -1871,6 +1875,8 @@ impl Control {
             let mut files = self.platform.clipboard_files();
             files.truncate(crate::transfer::MAX_FILES);
             files.shrink_to_fit();
+            // Android cannot use files: text and images still go.
+            if self.links[peer].os == Os::Android { files.clear(); }
             if !files.is_empty() {
                 let id = self.take_transfer_id();
                 self.file_jobs.submit(files::Job {
@@ -2048,7 +2054,11 @@ impl Control {
             ClipKind::Image => "image",
             ClipKind::Text => "text",
         };
-        if !self.config.share_clipboard {
+        if !self.config.receives_clipboard() {
+            return;
+        }
+        // Android has no place for files: refuse them without downloading.
+        if kind == ClipKind::Files && self.platform.os() == Os::Android {
             return;
         }
         let limit = u64::from(crate::transfer::LIMIT_MB) * 1024 * 1024;
@@ -2605,10 +2615,14 @@ mod tests {
         files: Mutex<Vec<std::path::PathBuf>>,
         stopped: AtomicUsize,
         mac: AtomicBool,
+        android: AtomicBool,
         on_files: Mutex<Option<Box<dyn Fn() + Send>>>,
     }
     impl Platform for TestPlatform {
-        fn os(&self) -> Os { if self.mac.load(Ordering::Relaxed) { Os::Mac } else { Os::Windows } }
+        fn os(&self) -> Os {
+            if self.android.load(Ordering::Relaxed) { Os::Android }
+            else if self.mac.load(Ordering::Relaxed) { Os::Mac } else { Os::Windows }
+        }
         fn displays(&self) -> Vec<Rect> { vec![Rect::new(0.0, 0.0, 100.0, 100.0)] }
         fn cursor(&self) -> Option<(f64, f64)> { Some((50.0, 50.0)) }
         fn warp(&self, _: f64, _: f64) {}
@@ -2975,6 +2989,61 @@ mod tests {
         release.send(()).unwrap();
         finish_file_jobs(&mut r.c);
         assert_eq!(r.c.outgoing.as_ref().map(|(peer, _)| peer.as_str()), Some(SUB));
+    }
+
+    #[test]
+    fn files_are_not_sent_to_android_but_text_is() {
+        let mut r = rig(Role::Master);
+        r.c.config.peers.push(peer(SUB, Role::Sub));
+        let rx = link(&mut r.c, SUB, Role::Sub);
+        r.c.links.get_mut(SUB).unwrap().os = Os::Android;
+        let path = r.dir.join("file");
+        std::fs::write(&path, b"clipboard").unwrap();
+        *r.p.files.lock().unwrap() = vec![path];
+        *r.p.text.lock().unwrap() = Some("hello".into());
+        rx.try_iter().for_each(drop);
+        r.c.send_clipboard(SUB);
+        finish_file_jobs(&mut r.c);
+        assert!(!r.c.file_jobs.busy() && r.c.outgoing.is_none());
+        let frames: Vec<_> = rx.try_iter().collect();
+        assert!(!frames.iter().any(|m| matches!(m, Msg::ClipStart { .. })));
+        assert!(frames.iter().any(|m| matches!(m, Msg::Clipboard { text } if text == "hello")));
+    }
+
+    #[test]
+    fn android_receiver_refuses_files_but_takes_text_and_images() {
+        use crate::transfer::{ClipKind, FileMeta};
+        let mut r = rig(Role::Master);
+        r.p.android.store(true, Ordering::Relaxed);
+        r.c.config.peers.push(peer(SUB, Role::Sub));
+        let _rx = link(&mut r.c, SUB, Role::Sub);
+        r.c.clip_start(SUB, 60, ClipKind::Files, vec![FileMeta { name: "a".into(), size: 3 }]);
+        assert!(r.c.incoming.is_none() && !r.c.file_jobs.busy());
+        r.c.clip_chunk(SUB, 60, 0, "AAAA");
+        r.c.clip_done(SUB, 60);
+        assert!(!r.c.file_jobs.busy() && r.p.files.lock().unwrap().is_empty());
+        r.c.clip_start(SUB, 61, ClipKind::Text, vec![FileMeta { name: "clipboard.txt".into(), size: 2 }]);
+        assert!(r.c.incoming.is_some());
+    }
+
+    #[test]
+    fn local_receive_switch_survives_master_settings() {
+        let mut r = rig(Role::Sub);
+        r.c.config.peers.push(peer(MASTER, Role::Master));
+        let _rx = link(&mut r.c, MASTER, Role::Master);
+        r.c.config.receive_clipboard = false;
+        let settings = MasterSettings::of(&NetConfig::default(), "master");
+        assert!(settings.share_clipboard);
+        message(&mut r.c, MASTER, Msg::MasterSettings(settings));
+        assert!(r.c.config.share_clipboard && !r.c.config.receives_clipboard());
+        message(&mut r.c, MASTER, Msg::Clipboard { text: "x".into() });
+        assert!(r.p.text.lock().unwrap().is_none());
+        r.c.update(r.c.config.clone());
+        assert!(!r.c.config.receives_clipboard());
+        let config = NetConfig { receive_clipboard: true, ..r.c.config.clone() };
+        r.c.update(config);
+        message(&mut r.c, MASTER, Msg::Clipboard { text: "y".into() });
+        assert_eq!(r.p.text.lock().unwrap().as_deref(), Some("y"));
     }
 
     fn queue_empty_receive(c: &mut Control) {

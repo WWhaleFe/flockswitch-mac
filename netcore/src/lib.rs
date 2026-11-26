@@ -270,6 +270,10 @@ pub struct NetConfig {
     pub notice_accepted: bool,
     /// Carry copied text, images and files along when the cursor moves to another computer.
     pub share_clipboard: bool,
+    /// This computer's own switch to take in clipboard content from others. The master's
+    /// settings never touch it: a sub that turned receiving off keeps it off.
+    #[serde(default = "enabled_by_default")]
+    pub receive_clipboard: bool,
     /// Size limit for images and files carried along, in MB (0 = text only).
     pub clipboard_limit_mb: u32,
     /// This computer's part: master (up to three subs) or sub (one master).
@@ -305,6 +309,7 @@ impl Default for NetConfig {
             require_control: false,
             notice_accepted: false,
             share_clipboard: true,
+            receive_clipboard: true,
             clipboard_limit_mb: transfer::DEFAULT_LIMIT_MB,
             app_drives_edges: false,
             role: Role::Master,
@@ -314,6 +319,11 @@ impl Default for NetConfig {
     }
 }
 impl NetConfig {
+    /// Whether clipboard content from others is taken in: sharing is on (the master's say
+    /// on a sub) and this computer's own receive switch too.
+    pub fn receives_clipboard(&self) -> bool {
+        self.share_clipboard && self.receive_clipboard
+    }
     /// The key rules for events leaving a `src` computer for a `dst` one; None between
     /// two computers of the same OS.
     pub fn rules_for(&self, src: Os, dst: Os) -> Option<DirRules> {
