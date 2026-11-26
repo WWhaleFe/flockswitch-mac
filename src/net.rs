@@ -40,6 +40,7 @@ extern "C" {
     fn CGEventGetDoubleValueField(event: Ref, field: u32) -> f64;
     fn CGEventGetFlags(event: Ref) -> u64;
     fn CGEventSourceFlagsState(state: i32) -> u64;
+    fn CGEventSourceKeyState(state: i32, key: u16) -> bool;
     fn CGEventSetFlags(event: Ref, flags: u64);
     fn CGEventSetIntegerValueField(event: Ref, field: u32, value: i64);
     fn CGEventCreateMouseEvent(source: Ref, kind: u32, point: Point, button: u32) -> Ref;
@@ -599,25 +600,51 @@ fn modifier_changes(previous: u64, flags: u64, key: u16, held: &mut [bool; 8]) -
 }
 /// How long after Caps Lock turned on a "turned off" still belongs to the same press.
 const CAPS_SAME_PRESS: Duration = Duration::from_millis(400);
-/// Whether a Caps Lock state flip is a new press, to be sent as one tap.
-/// Plain Caps Lock flips once per press (on, then off at the next press). With macOS's
-/// "use Caps Lock to switch input source", a short press flips on and back off at once
-/// on release; that off belongs to the same press and must not count again, or the
+/// Real timing of the Caps Lock key for netcore (`caps_long_press`).
+/// macOS delivers Caps Lock to an event tap only as a `flagsChanged` flip of the alpha-shift
+/// flag, never as key down/up. A flip that starts a press sends Caps down at once; the up
+/// follows when the physical key is seen up (`poll`, fed by the HID key state) or, with
+/// macOS's "use Caps Lock to switch input source" (on at release, straight back off), at
+/// the off flip. That off belongs to the same press and must not start another one, or the
 /// receiver would switch twice. The tap swallows the event, but the hardware state can
 /// still flip below the event tap; that cannot be prevented here.
-fn caps_press(on: bool, now: Instant, on_since: &mut Option<Instant>) -> bool {
-    if on {
-        *on_since = Some(now);
-        return true;
+#[derive(Default)]
+struct CapsPress {
+    /// Start of the press whose down was sent and whose up is still due.
+    down_since: Option<Instant>,
+    /// Last flip to on, for recognising the off of the same press after the up was sent.
+    on_since: Option<Instant>,
+}
+impl CapsPress {
+    /// A flip of the Caps Lock state. Returns the key events to send now.
+    fn flip(&mut self, on: bool, now: Instant) -> Vec<bool> {
+        if self.down_since.take().is_some() {
+            return vec![false];
+        }
+        let same = !on
+            && self.on_since.take().is_some_and(|t| now.duration_since(t) < CAPS_SAME_PRESS);
+        if same {
+            return Vec::new();
+        }
+        if on {
+            self.on_since = Some(now);
+        }
+        self.down_since = Some(now);
+        vec![true]
     }
-    let same = on_since.take().is_some_and(|t| now.duration_since(t) < CAPS_SAME_PRESS);
-    !same
+    /// Called every few ms with the physical key state. Sends the up once the key is up.
+    fn poll(&mut self, key_down: bool) -> Option<bool> {
+        if key_down {
+            return None;
+        }
+        self.down_since.take().map(|_| false)
+    }
 }
 struct Capture {
     sink: Sender<InputEvent>,
     flags: u64,
     held: [bool; 8],
-    caps_on_since: Option<Instant>,
+    caps: CapsPress,
     tap: Ref,
 }
 unsafe extern "C" fn capture(_: Ref, kind: u32, event: Ref, user: Ref) -> Ref {
@@ -661,11 +688,10 @@ unsafe extern "C" fn capture(_: Ref, kind: u32, event: Ref, user: Ref) -> Ref {
             }
             if (state.flags ^ flags) & (1 << 16) != 0 {
                 let on = flags & (1 << 16) != 0;
-                let press = caps_press(on, Instant::now(), &mut state.caps_on_since);
-                log::debug!("caps lock {} (press: {press})", if on { "on" } else { "off" });
-                if press {
-                    let _ = state.sink.send(InputEvent::Key { usage: 0x39, down: true });
-                    let _ = state.sink.send(InputEvent::Key { usage: 0x39, down: false });
+                let events = state.caps.flip(on, Instant::now());
+                log::debug!("caps lock {} (events: {events:?})", if on { "on" } else { "off" });
+                for down in events {
+                    let _ = state.sink.send(InputEvent::Key { usage: 0x39, down });
                 }
             }
             state.flags = flags;
@@ -779,7 +805,7 @@ impl Platform for MacPlatform {
                     sink,
                     flags: CGEventSourceFlagsState(0),
                     held: [false; 8],
-                    caps_on_since: None,
+                    caps: CapsPress::default(),
                     tap: null_mut(),
                 });
                 let mask = [1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 22, 25, 26, 27]
@@ -815,7 +841,17 @@ impl Platform for MacPlatform {
                 }
                 let _ = tx.send(true);
                 while !stopping.load(Ordering::Acquire) {
-                    CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, false);
+                    CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.01, false);
+                    if state.caps.down_since.is_some() {
+                        // 1 = HID system state: the physical key, not the tap's view.
+                        let held = CGEventSourceKeyState(1, 0x39);
+                        if let Some(down) = state.caps.poll(held) {
+                            let _ = state.sink.send(InputEvent::Key { usage: 0x39, down });
+                        }
+                    }
+                }
+                if state.caps.poll(false).is_some() {
+                    let _ = state.sink.send(InputEvent::Key { usage: 0x39, down: false });
                 }
                 CGEventTapEnable(tap, false);
                 CFMachPortInvalidate(tap);
@@ -1033,14 +1069,29 @@ mod tests {
     fn caps_is_a_toggle_and_scroll_keeps_fractions() {
         assert!(modifier_changes(0, 1 << 16, 0x39, &mut [false; 8]).is_empty());
         let t = Instant::now();
-        let mut since = None;
-        // Plain Caps Lock: on at one press, off at the next.
-        assert!(caps_press(true, t, &mut since));
-        assert!(caps_press(false, t + Duration::from_secs(2), &mut since));
+        let mut caps = CapsPress::default();
+        let ms = Duration::from_millis;
+        // Press held 120 ms (plain Caps Lock): down at the flip, up when the key is up.
+        assert_eq!(caps.flip(true, t), vec![true]);
+        assert_eq!(caps.poll(true), None);
+        assert_eq!(caps.poll(false), Some(false));
+        assert_eq!(caps.poll(false), None);
+        // Plain Caps Lock turning off at the next press starts a new press.
+        assert_eq!(caps.flip(false, t + ms(2000)), vec![true]);
+        assert_eq!(caps.poll(false), Some(false));
         // Input-source switching: on and straight back off within one short press.
-        assert!(caps_press(true, t + Duration::from_secs(3), &mut since));
-        assert!(!caps_press(false, t + Duration::from_millis(3150), &mut since));
-        assert!(caps_press(true, t + Duration::from_secs(5), &mut since));
+        assert_eq!(caps.flip(true, t + ms(3000)), vec![true]);
+        assert_eq!(caps.flip(false, t + ms(3120)), vec![false]);
+        // The same, when the poll already sent the up before the off flip.
+        assert_eq!(caps.flip(true, t + ms(4000)), vec![true]);
+        assert_eq!(caps.poll(false), Some(false));
+        assert!(caps.flip(false, t + ms(4150)).is_empty());
+        // Press held 700 ms: no up while the key stays down, flip off ends it.
+        assert_eq!(caps.flip(true, t + ms(5000)), vec![true]);
+        for _ in 0..70 {
+            assert_eq!(caps.poll(true), None);
+        }
+        assert_eq!(caps.flip(false, t + ms(5700)), vec![false]);
         let mut remainder = 0.0;
         assert_eq!(scroll_pixels(&mut remainder, 0.04), 0);
         assert_eq!(scroll_pixels(&mut remainder, 0.08), 1);
