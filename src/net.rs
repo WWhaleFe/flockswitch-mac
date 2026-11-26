@@ -403,6 +403,7 @@ pub fn spawn(shared: Arc<Shared>) -> JoinHandle<()> {
                         let unpaired = shared.clone();
                         let changed = shared.clone();
                         let master = shared.clone();
+                        let rules = shared.clone();
                         // No Logitech channels here: `switch_logitech` stays the no-op default.
                         let hooks = flock_net::Hooks {
                             switch_logitech: Box::new(|_| {}),
@@ -439,6 +440,11 @@ pub fn spawn(shared: Arc<Shared>) -> JoinHandle<()> {
                                     log::error!("save master settings: {e:#}");
                                 }
                             }),
+                            on_key_rules: Box::new(move |keys| {
+                                if let Err(e) = rules.update_config(|c| c.network.keys = keys) {
+                                    log::error!("save key rules: {e:#}");
+                                }
+                            }),
                             ..flock_net::Hooks::default()
                         };
                         match Service::start(config.clone(), platform.clone(), hooks) {
@@ -467,6 +473,9 @@ pub fn spawn(shared: Arc<Shared>) -> JoinHandle<()> {
                                     pairing: None,
                                     transfer: None,
                                     following: None,
+                                    layout: vec![],
+                                    reconnecting: false,
+                                    keys: Default::default(),
                                 };
                                 let _ = flock_net::write_status_with_permissions(config_dir(), &status, Some(permissions()));
                             }
@@ -1061,6 +1070,9 @@ mod tests {
             pairing: None,
             transfer: None,
             following: None,
+            layout: vec![],
+            reconnecting: false,
+            keys: Default::default(),
         };
         assert_eq!(NetState::of(&config, None), NetState::Off);
         assert_eq!(NetState::of(&config, Some(&status("local", None))), NetState::Idle);
