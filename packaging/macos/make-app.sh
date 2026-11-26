@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds flockswitch2.app around a compiled binary.
+# Builds flockswitch.app around a compiled binary.
 #   packaging/macos/make-app.sh <binary> <out-dir>
 # The version comes from Cargo.toml. The bundle is signed with the fixed self-signed identity (sign-app.sh), so
 # permission grants survive updates; Gatekeeper still asks once before the first launch.
@@ -9,11 +9,11 @@ bin="$1"
 out="$2"
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 version="$(grep -m1 '^version' "$root/Cargo.toml" | cut -d'"' -f2)"
-app="$out/flockswitch2.app"
+app="$out/flockswitch.app"
 
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-cp "$bin" "$app/Contents/MacOS/flockswitch2"
+cp "$bin" "$app/Contents/MacOS/flockswitch"
 sed "s/@VERSION@/$version/g" "$root/packaging/macos/Info.plist" > "$app/Contents/Info.plist"
 
 iconset="$(mktemp -d)/AppIcon.iconset"

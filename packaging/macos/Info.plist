@@ -2,10 +2,10 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleName</key><string>flockswitch2</string>
-  <key>CFBundleDisplayName</key><string>flockswitch2</string>
-  <key>CFBundleIdentifier</key><string>io.github.wwhalefe.flockswitch2</string>
-  <key>CFBundleExecutable</key><string>flockswitch2</string>
+  <key>CFBundleName</key><string>flockswitch</string>
+  <key>CFBundleDisplayName</key><string>flockswitch</string>
+  <key>CFBundleIdentifier</key><string>io.github.wwhalefe.flockswitch</string>
+  <key>CFBundleExecutable</key><string>flockswitch</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>@VERSION@</string>
@@ -13,8 +13,8 @@
   <key>LSMinimumSystemVersion</key><string>11.0</string>
   <!-- Menu-bar only: no Dock icon, no app switcher entry. -->
   <key>LSUIElement</key><true/>
-  <key>NSBluetoothAlwaysUsageDescription</key><string>flockswitch2 uses Bluetooth to detect and switch your Logitech mouse and keyboard.</string>
-  <key>NSLocalNetworkUsageDescription</key><string>flockswitch2 finds and connects to your other computers on the local network to share the mouse and keyboard.</string>
+  <key>NSBluetoothAlwaysUsageDescription</key><string>flockswitch uses Bluetooth to detect and switch your Logitech mouse and keyboard.</string>
+  <key>NSLocalNetworkUsageDescription</key><string>flockswitch finds and connects to your other computers on the local network to share the mouse and keyboard.</string>
   <key>NSBonjourServices</key><array><string>_flockswitch._tcp</string></array>
   <key>NSHumanReadableCopyright</key><string>Copyright (c) 2026 WWhaleFe. MIT License.</string>
 </dict>

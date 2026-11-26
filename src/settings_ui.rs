@@ -1,4 +1,4 @@
-//! The settings window. It runs as its own process (`flockswitch2 settings`) so the tray
+//! The settings window. It runs as its own process (`flockswitch settings`) so the tray
 //! app keeps its own event loop; changes are written to config.toml, which the running
 //! app reloads within a second. Every change applies immediately and the window
 //! stays open, unlike a native menu that closes after each click.
@@ -1317,6 +1317,10 @@ impl SettingsApp {
                 if self.net_tab == 3 {
                 let mut swap = net.swap_cmd_ctrl;
                 if switch_row(ui, p, t.net_swap, None, &mut swap) { self.apply(|c| c.network.swap_cmd_ctrl = swap); }
+                let mut capslock = net.mac_capslock_to_hangul;
+                if switch_row(ui, p, t.net_mac_capslock, Some(t.net_mac_hangul_note), &mut capslock) { self.apply(|c| c.network.mac_capslock_to_hangul = capslock); }
+                let mut shift_space = net.mac_shift_space_to_hangul;
+                if switch_row(ui, p, t.net_mac_shift_space, Some(t.net_mac_hangul_note), &mut shift_space) { self.apply(|c| c.network.mac_shift_space_to_hangul = shift_space); }
                 let mut lang1 = net.lang1_on_mac != "off";
                 if switch_row(ui, p, t.net_lang1, None, &mut lang1) { self.apply(|c| c.network.lang1_on_mac = if lang1 { "capslock" } else { "off" }.into()); }
                 divider(ui, p);

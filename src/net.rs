@@ -146,7 +146,7 @@ pub fn reported_permissions() -> Option<flock_net::Permissions> {
 pub fn reset_permissions() -> anyhow::Result<()> {
     let mut errors = Vec::new();
     for service in ["Accessibility", "ListenEvent"] {
-        match std::process::Command::new("tccutil").args(["reset", service, "io.github.wwhalefe.flockswitch2"]).output() {
+        match std::process::Command::new("tccutil").args(["reset", service, "io.github.wwhalefe.flockswitch"]).output() {
             Ok(result) if result.status.success() => {},
             Ok(result) => errors.push(String::from_utf8_lossy(&result.stderr).into_owned()),
             Err(e) => errors.push(e.to_string()),
@@ -159,7 +159,7 @@ pub fn reset_permissions() -> anyhow::Result<()> {
 }
 /// Clears this app's own stale grant for each permission that is missing, once per app
 /// version. After an update with a changed signature, System Settings may still show
-/// flockswitch2 as allowed while the grant no longer matches; turning that row on and off
+/// flockswitch as allowed while the grant no longer matches; turning that row on and off
 /// does nothing until it is removed. Doing the removal here means the user only has to
 /// switch the fresh row on. Working permissions are left alone.
 fn clear_stale_grants() {
@@ -170,7 +170,7 @@ fn clear_stale_grants() {
     if !p.accessibility { services.push("Accessibility"); }
     if !p.input_monitoring { services.push("ListenEvent"); }
     for service in services {
-        match std::process::Command::new("tccutil").args(["reset", service, "io.github.wwhalefe.flockswitch2"]).output() {
+        match std::process::Command::new("tccutil").args(["reset", service, "io.github.wwhalefe.flockswitch"]).output() {
             Ok(r) if r.status.success() => log::info!("permissions: cleared the old {service} entry"),
             Ok(r) => log::warn!("permissions: tccutil {service}: {}", String::from_utf8_lossy(&r.stderr).trim()),
             Err(e) => log::warn!("permissions: tccutil {service}: {e}"),
@@ -537,22 +537,29 @@ fn modifier_changes(previous: u64, flags: u64, key: u16, held: &mut [bool; 8]) -
             }
         }
     }
-    if (previous ^ flags) & (1 << 16) != 0 {
-        events.push(InputEvent::Key {
-            usage: 0x39,
-            down: true,
-        });
-        events.push(InputEvent::Key {
-            usage: 0x39,
-            down: false,
-        });
-    }
     events
+}
+/// How long after Caps Lock turned on a "turned off" still belongs to the same press.
+const CAPS_SAME_PRESS: Duration = Duration::from_millis(400);
+/// Whether a Caps Lock state flip is a new press, to be sent as one tap.
+/// Plain Caps Lock flips once per press (on, then off at the next press). With macOS's
+/// "use Caps Lock to switch input source", a short press flips on and back off at once
+/// on release; that off belongs to the same press and must not count again, or the
+/// receiver would switch twice. The tap swallows the event, but the hardware state can
+/// still flip below the event tap; that cannot be prevented here.
+fn caps_press(on: bool, now: Instant, on_since: &mut Option<Instant>) -> bool {
+    if on {
+        *on_since = Some(now);
+        return true;
+    }
+    let same = on_since.take().is_some_and(|t| now.duration_since(t) < CAPS_SAME_PRESS);
+    !same
 }
 struct Capture {
     sink: Sender<InputEvent>,
     flags: u64,
     held: [bool; 8],
+    caps_on_since: Option<Instant>,
     tap: Ref,
 }
 unsafe extern "C" fn capture(_: Ref, kind: u32, event: Ref, user: Ref) -> Ref {
@@ -593,6 +600,15 @@ unsafe extern "C" fn capture(_: Ref, kind: u32, event: Ref, user: Ref) -> Ref {
             let flags = CGEventGetFlags(event);
             for ev in modifier_changes(state.flags, flags, field(9) as u16, &mut state.held) {
                 let _ = state.sink.send(ev);
+            }
+            if (state.flags ^ flags) & (1 << 16) != 0 {
+                let on = flags & (1 << 16) != 0;
+                let press = caps_press(on, Instant::now(), &mut state.caps_on_since);
+                log::debug!("caps lock {} (press: {press})", if on { "on" } else { "off" });
+                if press {
+                    let _ = state.sink.send(InputEvent::Key { usage: 0x39, down: true });
+                    let _ = state.sink.send(InputEvent::Key { usage: 0x39, down: false });
+                }
             }
             state.flags = flags;
             None
@@ -681,7 +697,7 @@ impl Platform for MacPlatform {
         }
     }
     fn received_dir(&self) -> Option<PathBuf> {
-        Some(dirs::download_dir()?.join("flockswitch2"))
+        Some(dirs::download_dir()?.join("flockswitch"))
     }
     fn permissions(&self) -> Option<flock_net::Permissions> { Some(permissions()) }
     fn ready(&self) -> Result<(), String> {
@@ -705,6 +721,7 @@ impl Platform for MacPlatform {
                     sink,
                     flags: CGEventSourceFlagsState(0),
                     held: [false; 8],
+                    caps_on_since: None,
                     tap: null_mut(),
                 });
                 let mask = [1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 22, 25, 26, 27]
@@ -956,7 +973,16 @@ mod tests {
     }
     #[test]
     fn caps_is_a_toggle_and_scroll_keeps_fractions() {
-        assert_eq!(modifier_changes(0, 1 << 16, 0x39, &mut [false; 8]).len(), 2);
+        assert!(modifier_changes(0, 1 << 16, 0x39, &mut [false; 8]).is_empty());
+        let t = Instant::now();
+        let mut since = None;
+        // Plain Caps Lock: on at one press, off at the next.
+        assert!(caps_press(true, t, &mut since));
+        assert!(caps_press(false, t + Duration::from_secs(2), &mut since));
+        // Input-source switching: on and straight back off within one short press.
+        assert!(caps_press(true, t + Duration::from_secs(3), &mut since));
+        assert!(!caps_press(false, t + Duration::from_millis(3150), &mut since));
+        assert!(caps_press(true, t + Duration::from_secs(5), &mut since));
         let mut remainder = 0.0;
         assert_eq!(scroll_pixels(&mut remainder, 0.04), 0);
         assert_eq!(scroll_pixels(&mut remainder, 0.08), 1);

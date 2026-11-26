@@ -92,10 +92,9 @@ USAGE:
 Set RUST_LOG=debug for more detail.";
 
 /// Port used only as a lock so two copies never react to the same button press.
-/// flockswitch uses 47851, so the two programs can run side by side.
-const INSTANCE_PORT: u16 = 47_861;
+const INSTANCE_PORT: u16 = 47_851;
 /// The program's name: login item, tray tooltip, settings header.
-pub const APP_NAME: &str = "flockswitch2";
+pub const APP_NAME: &str = "flockswitch";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
