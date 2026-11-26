@@ -15,9 +15,14 @@ fn master(cfg: &Config) -> Option<&str> {
     (cfg.network.role == Role::Sub).then(|| cfg.network.peers.iter().find(|p| p.role == Role::Master).map(|p| p.id.as_str())).flatten()
 }
 
-pub fn queue(config: &Path, cfg: &Config) -> Result<()> {
+/// Queues only the pairs the user changed. Successive edits merge per pair, the newest
+/// value of a pair wins.
+pub fn queue(config: &Path, cfg: &Config, changed: &BTreeMap<String, DirRules>) -> Result<()> {
+    if changed.is_empty() { return Ok(()); }
     if let Some(master) = master(cfg) {
-        let pending = Pending { master: master.into(), keys: cfg.network.all_rules() };
+        let mut keys = pending(config, cfg)?.map(|p| p.keys).unwrap_or_default();
+        keys.extend(changed.iter().map(|(pair, rule)| (pair.clone(), rule.clone())));
+        let pending = Pending { master: master.into(), keys };
         file_io::atomic_write(&path(config), &serde_json::to_vec(&pending)?)?;
     }
     Ok(())
@@ -64,10 +69,11 @@ pub fn apply_master(config: &Path, cfg: &mut Config, settings: &MasterSettings) 
     let edit = pending(config, cfg)?;
     settings.apply_to(&mut cfg.network);
     if let Some(edit) = edit {
-        if settings.keys == edit.keys {
+        // The master echoes its whole table: only the pairs we sent must match.
+        if edit.keys.iter().all(|(pair, rule)| settings.keys.get(pair) == Some(rule)) {
             std::fs::remove_file(path(config))?;
         } else {
-            cfg.network.keys = edit.keys;
+            cfg.network.keys.extend(edit.keys);
         }
     }
     Ok(())
@@ -96,10 +102,11 @@ mod tests {
         let mut f = Fixture::new();
         let old = MasterSettings::of(&f.cfg.network, "master");
         f.cfg.network.keys.get_mut("mac>windows").unwrap().hanja = true;
-        queue(&f.config, &f.cfg).unwrap();
+        let delta: BTreeMap<_, _> = [("mac>windows".to_string(), f.cfg.network.keys["mac>windows"].clone())].into();
+        queue(&f.config, &f.cfg, &delta).unwrap();
         let wanted = f.cfg.network.keys.clone();
-        assert_eq!(pending(&f.config, &f.cfg).unwrap().unwrap().keys, wanted);
-        assert_eq!(pending(&f.config, &f.cfg).unwrap().unwrap().keys, wanted);
+        assert_eq!(pending(&f.config, &f.cfg).unwrap().unwrap().keys, delta);
+        assert_eq!(pending(&f.config, &f.cfg).unwrap().unwrap().keys, delta);
         apply_master(&f.config, &mut f.cfg, &old).unwrap();
         assert_eq!(f.cfg.network.keys, wanted);
         assert!(path(&f.config).exists());
@@ -122,19 +129,19 @@ mod tests {
     #[test]
     fn outbox_is_dropped_when_it_no_longer_fits_the_config() {
         let mut f = Fixture::new();
-        queue(&f.config, &f.cfg).unwrap();
+        queue(&f.config, &f.cfg, &f.cfg.network.keys.clone()).unwrap();
         drop_stale(&f.config, &f.cfg);
         assert!(path(&f.config).exists());
         f.cfg.network.peers.clear();
         drop_stale(&f.config, &f.cfg);
         assert!(!path(&f.config).exists());
         let mut g = Fixture::new();
-        queue(&g.config, &g.cfg).unwrap();
+        queue(&g.config, &g.cfg, &g.cfg.network.keys.clone()).unwrap();
         g.cfg.network.role = Role::Master;
         drop_stale(&g.config, &g.cfg);
         assert!(!path(&g.config).exists());
         let h = Fixture::new();
-        queue(&h.config, &h.cfg).unwrap();
+        queue(&h.config, &h.cfg, &h.cfg.network.keys.clone()).unwrap();
         clear(&h.config);
         clear(&h.config);
         assert!(!path(&h.config).exists());
@@ -143,13 +150,36 @@ mod tests {
     #[test]
     fn old_echo_cannot_remove_a_newer_edit() {
         let mut f = Fixture::new();
-        queue(&f.config, &f.cfg).unwrap();
+        queue(&f.config, &f.cfg, &f.cfg.network.keys.clone()).unwrap();
         let old_echo = MasterSettings::of(&f.cfg.network, "master");
         let _read_by_sender = pending(&f.config, &f.cfg).unwrap();
         f.cfg.network.keys.get_mut("mac>windows").unwrap().hanja = true;
-        queue(&f.config, &f.cfg).unwrap();
+        queue(&f.config, &f.cfg, &f.cfg.network.keys.clone()).unwrap();
         apply_master(&f.config, &mut f.cfg, &old_echo).unwrap();
         assert!(path(&f.config).exists());
         assert!(f.cfg.network.keys["mac>windows"].hanja);
+    }
+
+    #[test]
+    fn successive_edits_merge_per_pair_and_only_those_pairs_are_echo_checked() {
+        let mut f = Fixture::new();
+        let one = |f: &Fixture, pair: &str, hanja: bool| {
+            let mut rule = f.cfg.network.keys[pair].clone();
+            rule.hanja = hanja;
+            BTreeMap::from([(pair.to_string(), rule)])
+        };
+        queue(&f.config, &f.cfg, &one(&f, "mac>windows", true)).unwrap();
+        queue(&f.config, &f.cfg, &one(&f, "linux>windows", true)).unwrap();
+        queue(&f.config, &f.cfg, &one(&f, "mac>windows", false)).unwrap();
+        let keys = pending(&f.config, &f.cfg).unwrap().unwrap().keys;
+        assert_eq!(keys.len(), 2);
+        assert!(!keys["mac>windows"].hanja && keys["linux>windows"].hanja);
+        // The master's table differs on an unrelated pair: still an acknowledgement.
+        let mut echo = MasterSettings::of(&f.cfg.network, "master");
+        echo.keys.insert("linux>windows".into(), keys["linux>windows"].clone());
+        echo.keys.insert("mac>windows".into(), keys["mac>windows"].clone());
+        echo.keys.get_mut("windows>mac").unwrap().hanja = !echo.keys["windows>mac"].hanja;
+        apply_master(&f.config, &mut f.cfg, &echo).unwrap();
+        assert!(!path(&f.config).exists());
     }
 }
