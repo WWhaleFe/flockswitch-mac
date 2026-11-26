@@ -65,6 +65,10 @@ pub struct StatusFile {
     /// This computer's channel (1-based), for the 이동할 채널 rows.
     #[serde(default)]
     pub channel: Option<u8>,
+    /// A newer version the menu-bar app has found (its number), so that the settings
+    /// window offers "Update now" at once.
+    #[serde(default)]
+    pub update_available: Option<String>,
 }
 
 fn status_path() -> std::path::PathBuf {
@@ -375,6 +379,10 @@ impl Shared {
             hotkeys_failed: st.hotkeys_failed.clone(),
             channel: st.channel,
             version: env!("CARGO_PKG_VERSION").into(),
+            update_available: match &st.update {
+                crate::update::UpdateState::Available(r) | crate::update::UpdateState::UpdateFailed(r, _) => Some(r.version.clone()),
+                _ => None,
+            },
         };
         drop(st);
         // Only touch the disk when something the settings window shows has changed.

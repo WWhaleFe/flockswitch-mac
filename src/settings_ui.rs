@@ -30,33 +30,43 @@ const REFRESH: Duration = Duration::from_secs(1);
 const ICON_SIDE: u32 = 96;
 const ICON_RGBA: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/window-icon.rgba"));
 
-/// The settings window's size to start with, and the limits it may be resized within.
-const WINDOW_SIZE: [f32; 2] = [840.0, 970.0];
-const WINDOW_MIN: [f32; 2] = [760.0, 640.0];
-const WINDOW_MAX: [f32; 2] = [1200.0, 1300.0];
-/// Room kept free on the display (menu bar, Dock) when the window grows to fit a page.
-const SCREEN_MARGIN: f32 = 80.0;
+/// The settings window's size. It is fixed: pages scroll inside it, and neither a page
+/// change nor an opened row ever makes the window bigger or smaller.
+const WINDOW_SIZE: [f32; 2] = [1040.0, 740.0];
+/// The sidebar's width, and the room around the page beside it.
+const SIDEBAR_WIDTH: f32 = 220.0;
+const PAGE_PADDING: Vec2 = Vec2::new(28.0, 22.0);
+/// Every section header (the small title above a box) is this tall, so boxes side by
+/// side start at the same line.
+const SECTION_HEAD: f32 = 32.0;
+
+mod connect;
+mod keys;
+mod logitech;
+
+/// The window: one fixed size, no resizing, no maximize button.
+fn window_builder(title: &str, icon: egui::IconData) -> egui::ViewportBuilder {
+    egui::ViewportBuilder::default()
+        .with_title(title)
+        .with_icon(icon)
+        .with_inner_size(WINDOW_SIZE)
+        .with_min_inner_size(WINDOW_SIZE)
+        .with_max_inner_size(WINDOW_SIZE)
+        .with_resizable(false)
+        .with_maximize_button(false)
+        .with_active(true)
+}
 
 /// Opens the window. `lock` keeps a second window from opening; a connection to it
 /// means "Settings…" was chosen again, so the window comes back to the front.
-/// `show_update` opens on the General tab (from the "new version" menu item).
+/// `show_update` opens on the General page (from the "new version" menu item).
 pub fn run(lock: std::net::TcpListener, show_update: bool) -> Result<()> {
     if let Ok(cfg) = Config::load_or_create() {
         crate::i18n::set_language(&cfg.language);
     }
     let t = texts();
     let icon = egui::IconData { rgba: ICON_RGBA.to_vec(), width: ICON_SIDE, height: ICON_SIDE };
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title(t.settings_title)
-            .with_icon(icon)
-            .with_inner_size(WINDOW_SIZE)
-            .with_min_inner_size(WINDOW_MIN)
-            .with_max_inner_size(WINDOW_MAX)
-            .with_maximize_button(false)
-            .with_active(true),
-        ..Default::default()
-    };
+    let options = eframe::NativeOptions { viewport: window_builder(t.settings_title, icon), ..Default::default() };
     eframe::run_native(
         "flockswitch-settings",
         options,
@@ -160,7 +170,7 @@ fn install_style(ctx: &egui::Context) {
         visuals.panel_fill = p.bg;
         visuals.window_fill = p.bg;
         visuals.override_text_color = Some(p.text);
-        visuals.selection.bg_fill = p.accent.gamma_multiply(0.45);
+        visuals.selection.bg_fill = p.strong.gamma_multiply(0.22);
         visuals.selection.stroke = Stroke::new(1.0, p.ink);
         // Drop-downs and the colour picker: framed like the buttons.
         for (w, fill) in [
@@ -183,6 +193,7 @@ fn install_style(ctx: &egui::Context) {
 /// ground, white cards, ink-black marks and one fluorescent lime accent.
 #[derive(Clone, Copy)]
 struct Palette {
+    dark: bool,
     bg: Color32,
     /// The ground's gradient, top and bottom (the same as `bg` where it is flat).
     bg_top: Color32,
@@ -193,12 +204,16 @@ struct Palette {
     hover: Color32,
     text: Color32,
     muted: Color32,
-    /// Lime. Never used for text on the ground: see `accent_text`.
+    /// Lime. Only the "mouse is here" dot and the chosen role use it.
     accent: Color32,
     /// Text and marks on the lime (ink, never white).
     ink: Color32,
-    /// Accent-coloured text on the ground: lime itself is too pale on the light ground.
-    accent_text: Color32,
+    /// What an "on" mark is made of (a switch, a primary button, a ticked box): ink on
+    /// the light ground, near-white on the dark one, with `on_strong` drawn on it.
+    strong: Color32,
+    on_strong: Color32,
+    /// A chosen segment: raised above the bar.
+    seg_on: Color32,
     /// A chosen "Off" segment and a switch that is off: neutral gray.
     off: Color32,
     /// The dashed outline and the hatching of the "other computer" cards.
@@ -219,6 +234,7 @@ impl Palette {
         if dark {
             let bg = INK;
             Palette {
+                dark: true,
                 bg,
                 bg_top: bg,
                 bg_bottom: bg,
@@ -230,7 +246,9 @@ impl Palette {
                 muted: Color32::from_rgb(0xA3, 0xA7, 0xB0),
                 accent: LIME,
                 ink: INK,
-                accent_text: LIME,
+                strong: Color32::from_rgb(0xF2, 0xF3, 0xF5),
+                on_strong: INK,
+                seg_on: Color32::from_rgb(0x4A, 0x4D, 0x55),
                 off: Color32::from_rgb(0x5A, 0x5D, 0x64),
                 dash: Color32::from_rgb(0x5A, 0x5D, 0x64),
                 hatch: Color32::from_rgba_unmultiplied(0x6B, 0x6F, 0x78, 60),
@@ -241,6 +259,7 @@ impl Palette {
             }
         } else {
             Palette {
+                dark: false,
                 bg: Color32::from_rgb(0xEC, 0xEE, 0xF1),
                 bg_top: Color32::from_rgb(0xF0, 0xF1, 0xF3),
                 bg_bottom: Color32::from_rgb(0xE4, 0xE6, 0xEA),
@@ -252,7 +271,9 @@ impl Palette {
                 muted: Color32::from_rgb(0x6B, 0x6F, 0x78),
                 accent: LIME,
                 ink: INK,
-                accent_text: INK,
+                strong: INK,
+                on_strong: Color32::WHITE,
+                seg_on: Color32::WHITE,
                 off: Color32::from_rgb(0xC9, 0xCC, 0xD2),
                 dash: Color32::from_rgb(0xA4, 0xA9, 0xB1),
                 hatch: Color32::from_rgba_unmultiplied(0xCD, 0xD0, 0xD6, 110),
@@ -296,14 +317,48 @@ fn bold(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name("bold".into()))
 }
 
-/// The pages of the window, one tab each.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-enum Tab {
-    Switching,
+/// The pages of the window, one entry each in the sidebar.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum Page {
+    Connect,
+    Cross,
+    Keys,
+    Clip,
+    This,
+    Buttons,
+    Hotkeys,
+    Edges,
     Devices,
-    Network,
     Effects,
     General,
+}
+
+impl Page {
+    /// The sidebar, top to bottom: the group title and its pages.
+    fn groups(t: &Texts) -> [(&'static str, Vec<(Page, &'static str)>); 3] {
+        [
+            (
+                t.group_network,
+                vec![
+                    (Page::Connect, t.nav_connect),
+                    (Page::Cross, t.net_crossing),
+                    (Page::Keys, t.nav_keys),
+                    (Page::Clip, t.nav_clip),
+                    (Page::This, t.net_this_computer),
+                ],
+            ),
+            (
+                t.group_logitech,
+                vec![
+                    (Page::Buttons, t.nav_buttons),
+                    (Page::Hotkeys, t.nav_hotkeys),
+                    (Page::Edges, t.nav_edges),
+                    (Page::Devices, t.section_devices),
+                ],
+            ),
+            (t.group_app, vec![(Page::Effects, t.section_effects), (Page::General, t.section_general)]),
+        ]
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -338,8 +393,6 @@ enum Uninstall {
 struct SettingsApp {
     net_status: Option<flock_net::Status>,
     net_read: Instant,
-    /// The service's status as last read for the header (see `refresh`).
-    header_status: Option<flock_net::Status>,
     net_address: String,
     /// The port as typed (Apply checks it), what is wrong with it, and one waiting for confirmation.
     net_port_edit: Option<String>,
@@ -351,15 +404,26 @@ struct SettingsApp {
     net_ips: (Instant, Vec<String>),
     /// The "How does it work?" window is open.
     net_how: bool,
-    tab: Tab,
+    page: Page,
     /// The cursor-highlight shortcut is being recorded.
     recording: Option<u8>,
-    button_tab: u16,
     gesture_tab: Gesture,
     devices: Vec<DeviceInfo>,
     haptics_dialog: Option<HapticsDialog>,
-    net_tab: usize,
     edge_confirm: bool,
+    /// The computer picked on the layout map, waiting for an empty cell.
+    layout_pick: Option<String>,
+    /// This computer's network id (from the status, or read from the identity file).
+    my_id: Option<String>,
+    /// The keyboard pane: which OS pair and which direction of it is shown.
+    key_pair: usize,
+    key_dir: usize,
+    /// The "compare keys by system" window is open.
+    keys_cmp: bool,
+    /// The window looked up the newer version the menu-bar app found (once).
+    update_probed: bool,
+    /// "Find connections again" was pressed (shows "Searching" for a moment).
+    rescan_at: Option<Instant>,
     uninstall: Uninstall,
     cfg: Config,
     status: StatusFile,
@@ -393,8 +457,6 @@ struct SettingsApp {
     backup_count: usize,
     /// "Manage…" is open.
     backup_manager: Option<BackupManager>,
-    /// The page height each tab last made the window grow for.
-    fitted_for: std::collections::HashMap<Tab, f32>,
 }
 
 /// "Manage…": the saved files, newest first, each to rename or delete.
@@ -535,7 +597,6 @@ impl SettingsApp {
         let mut app = SettingsApp {
             net_status: None,
             net_read: Instant::now() - Duration::from_secs(1),
-            header_status: None,
             net_address: String::new(),
             net_port_edit: None,
             net_port_error: None,
@@ -543,14 +604,19 @@ impl SettingsApp {
             net_notice_open: false,
             net_ips: (Instant::now() - Duration::from_secs(60), Vec::new()),
             net_how: false,
-            tab: if show_update { Tab::General } else { Tab::Network },
+            page: if show_update { Page::General } else { Page::Connect },
             recording: None,
-            button_tab: BUTTON_WHEEL_MODE,
             gesture_tab: Gesture::Press,
             devices: Vec::new(),
             haptics_dialog: None,
-            net_tab: 0,
             edge_confirm: false,
+            layout_pick: None,
+            my_id: None,
+            key_pair: 0,
+            key_dir: 0,
+            keys_cmp: false,
+            update_probed: false,
+            rescan_at: None,
             uninstall: Uninstall::Idle,
             cfg: Config::load_or_create().unwrap_or_default(),
             status: StatusFile::default(),
@@ -573,7 +639,6 @@ impl SettingsApp {
             backup_full: false,
             backup_count: 0,
             backup_manager: None,
-            fitted_for: std::collections::HashMap::new(),
         };
         app.refresh();
         if show_update || app.cfg.check_updates {
@@ -627,7 +692,6 @@ impl SettingsApp {
         self.status = shared::load_status_file();
         self.devices = shared::load_catalog();
         for d in &mut self.devices { d.online = self.status.online.iter().any(|key| key.eq_ignore_ascii_case(&d.key)); }
-        self.header_status = flock_net::read_status(crate::net::config_dir()).ok();
         self.backup_count = backup::count();
         // Room again (files deleted, here or in Finder): the refusal no longer holds.
         self.backup_full &= self.backup_count >= backup::MAX_SAVED;
@@ -705,27 +769,44 @@ impl eframe::App for SettingsApp {
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        self.show(ui);
+    }
+}
+
+impl SettingsApp {
+    /// One frame of the window (`App::ui`, without the frame handle, so a test can run it).
+    fn show(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
         let t = texts();
         if self.title != t.settings_title {
             self.title = t.settings_title;
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(t.settings_title.into()));
         }
-        self.size_guard.keep(&ctx, Vec2::from(WINDOW_MIN), Vec2::from(WINDOW_MAX));
+        let fixed = Vec2::from(WINDOW_SIZE);
+        self.size_guard.keep(&ctx, fixed, fixed);
         let p = Palette::new(ui.visuals().dark_mode);
         paint_ground(ui, p);
-        let panel = egui::Frame::new().inner_margin(Margin::symmetric(18, 12));
         // After uninstalling, show only the result: re-reading the settings now would
         // create the deleted settings folder again.
         if self.uninstall_progress() {
             ctx.request_repaint_after(Duration::from_millis(300));
+            let panel = egui::Frame::new().inner_margin(Margin::symmetric(18, 12));
             egui::CentralPanel::default().frame(panel).show(ui, |ui| self.uninstall_result(ui, t, p));
             return;
         }
         if self.last_refresh.elapsed() >= REFRESH {
             self.refresh();
         }
-        ctx.request_repaint_after(REFRESH);
+        self.poll_network();
+        // The menu-bar app knows of a newer version: look it up here too, so that "Update
+        // now" is on the page without waiting for a check.
+        if !self.update_probed && self.status.update_available.is_some() {
+            self.update_probed = true;
+            if matches!(*self.update.lock().unwrap(), UpdateUi::Idle | UpdateUi::UpToDate | UpdateUi::Failed(_)) {
+                self.check_update(&ctx);
+            }
+        }
+        ctx.request_repaint_after(if self.page.is_network() { Duration::from_millis(500) } else { REFRESH });
         // Installed: the menu-bar app restarts by itself; this window closes and opens
         // again as the new version.
         let installed = matches!(*self.update.lock().unwrap(), UpdateUi::Installed(at) if at.elapsed() >= REOPEN_AFTER_INSTALL);
@@ -736,103 +817,52 @@ impl eframe::App for SettingsApp {
             self.capture_shortcut(&ctx, t, n);
         }
 
-        let modal = self.edge_confirm || self.haptics_dialog.is_some() || self.backup_picker.is_some() || self.backup_manager.is_some() || self.net_port_confirm.is_some();
+        let modal = self.edge_confirm
+            || self.haptics_dialog.is_some()
+            || self.backup_picker.is_some()
+            || self.backup_manager.is_some()
+            || self.net_port_confirm.is_some();
 
-        // The header and the tabs stay in place; only the page below them scrolls.
-        egui::CentralPanel::default().frame(panel).show(ui, |ui| {
-            if modal {
-                ui.disable();
-            }
-            self.header(ui, t, p);
-            ui.add_space(12.0);
-            let tabs = [
-                (Tab::Switching, t.section_switching),
-                (Tab::Network, t.section_network),
-                (Tab::Devices, t.section_devices),
-                (Tab::Effects, t.section_effects),
-                (Tab::General, t.section_general),
-            ];
-            let labels: Vec<String> = tabs.iter().map(|(_, l)| l.to_string()).collect();
-            if let Some(i) = segments(ui, p, "tabs", &labels, Role::Tab, SEG_NORMAL, &[], None, |i| tabs[i].0 == self.tab) {
-                self.tab = tabs[i].0;
-                self.stop_recording();
-            }
-            // A page taller than the window makes the window taller once (see
-            // `grow_to_fit`); what still does not fit scrolls.
-            let page = egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                {
-                    if let Some(err) = self.error.clone() {
-                        ui.add_space(10.0);
-                        egui::Frame::new()
-                            .fill(p.red.gamma_multiply(0.12))
-                            .stroke(Stroke::new(1.0, p.red.gamma_multiply(0.6)))
-                            .corner_radius(8)
-                            .inner_margin(Margin::symmetric(12, 8))
-                            .show(ui, |ui| {
-                                ui.set_width(ui.available_width());
-                                ui.label(RichText::new(err).color(p.red));
-                            });
-                    }
-                    match self.tab {
-                        Tab::Switching => self.switching_section(ui, t, p),
-                        Tab::Devices => { self.master_section(ui, t, p); self.group_section(ui, t, p); },
-                        Tab::Network => self.network_section(ui, t, p),
-                        Tab::Effects => self.effects_section(ui, t, p),
-                        Tab::General => {
-                            two_columns(ui, |left, right| {
-                                self.preferences_card(left, t, p);
-                                self.update_section(left, t, p);
-                                self.report_section(left, t, p);
-                                self.backup_section(right, t, p);
-                                self.maintenance_card(right, t, p);
-                            });
-                        }
-                    }
+        // The sidebar and the page are two fixed areas; only the page scrolls, inside its
+        // area, so the window itself never changes size.
+        let full = ui.max_rect();
+        let side_rect = Rect::from_min_size(full.min, Vec2::new(SIDEBAR_WIDTH, full.height()));
+        let main_rect = Rect::from_min_max(Pos2::new(side_rect.right(), full.top()), full.max);
+        ui.painter().vline(side_rect.right(), full.y_range(), Stroke::new(1.0, p.border));
 
-                    ui.add_space(12.0);
-                    ui.vertical_centered(|ui| {
-                        ui.label(
-                            RichText::new(format!("{} · flockswitch {}", t.applies_immediately, env!("CARGO_PKG_VERSION")))
-                                .size(12.0)
-                                .color(p.muted),
-                        );
-                    });
+        let mut side = ui.new_child(UiBuilder::new().max_rect(side_rect.shrink2(Vec2::new(12.0, 16.0))));
+        if modal {
+            side.disable();
+        }
+        egui::ScrollArea::vertical().id_salt("sidebar").auto_shrink([false, false]).show(&mut side, |ui| self.sidebar(ui, t, p));
+
+        let mut main = ui.new_child(UiBuilder::new().max_rect(main_rect.shrink2(Vec2::new(PAGE_PADDING.x, PAGE_PADDING.y))));
+        if modal {
+            main.disable();
+        }
+        egui::ScrollArea::vertical().id_salt(("page", self.page)).auto_shrink([false, false]).show(&mut main, |ui| {
+            // Room on the right for the scroll bar, so rows never run under it.
+            ui.set_max_width(ui.available_width() - 10.0);
+            if let Some(err) = self.error.clone() {
+                if note_box(ui, p, NoteKind::Error, &err, None) {
+                    self.error = None;
                 }
+                ui.add_space(14.0);
+            }
+            self.page_body(ui, t, p);
+            ui.add_space(24.0);
+            ui.vertical_centered(|ui| {
+                ui.label(RichText::new(format!("{} · flockswitch {}", t.applies_immediately, env!("CARGO_PKG_VERSION"))).size(12.0).color(p.muted));
             });
-            if self.tab != Tab::Network { self.grow_to_fit(&ctx, page.content_size.y - page.inner_rect.height()); }
+            ui.add_space(4.0);
         });
         self.port_confirm_window(&ctx, t, p);
         self.how_window(&ctx, t);
+        self.keycmp_window(&ctx, t);
         self.haptics_window(&ctx, t);
         self.edge_confirm_window(&ctx, t, p);
         self.backup_window(&ctx, t, p);
         self.backup_manager_window(&ctx, t, p);
-    }
-}
-
-impl SettingsApp {
-    /// Makes the window taller by `overflow` (how much of the page does not fit), up to
-    /// the display's height and the window's limit. Only when the page itself grew (or
-    /// another tab is shown): a window the user made smaller is not made bigger again
-    /// for the same page, and it is never made smaller.
-    fn grow_to_fit(&mut self, ctx: &egui::Context, overflow: f32) {
-        let (inner, monitor) = ctx.input(|i| (i.viewport().inner_rect, i.viewport().monitor_size));
-        let Some(inner) = inner else { return };
-        let content = inner.height() + overflow;
-        let fitted = self.fitted_for.get(&self.tab).copied();
-        if overflow <= 1.0 || fitted.is_some_and(|h| content <= h + 1.0) {
-            return;
-        }
-        self.fitted_for.insert(self.tab, content);
-        let limit = monitor.map_or(WINDOW_MAX[1], |m| (m.y - SCREEN_MARGIN).min(WINDOW_MAX[1]));
-        let want = (inner.height() + overflow).ceil().min(limit);
-        if want <= inner.height() + 0.5 {
-            return;
-        }
-        let size = Vec2::new(inner.width(), want);
-        log::info!("settings window: the page needs {content:.0}, growing {:.0} -> {want:.0}", inner.height());
-        self.size_guard.size = Some(size);
-        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
     }
 
     /// Un-minimizes and focuses the window when it starts and whenever "Settings…" is
@@ -849,25 +879,6 @@ impl SettingsApp {
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         ctx.request_repaint_after(Duration::from_millis(100));
-    }
-
-    /// App icon, name and what the network is doing.
-    fn header(&mut self, ui: &mut Ui, t: &Texts, p: Palette) {
-        let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 48.0), Sense::hover());
-        let painter = ui.painter();
-        let icon = Rect::from_min_size(rect.min + Vec2::new(0.0, 4.0), Vec2::splat(40.0));
-        let x = icon.right() + 12.0;
-        painter.text(Pos2::new(x, rect.top() + 3.0), Align2::LEFT_TOP, crate::APP_NAME, bold(19.0), p.text);
-
-        let state = NetState::of(&self.cfg, self.header_status.as_ref());
-        let color = if state == NetState::Off { p.muted } else { p.green };
-        let device = if let Some(name) = &self.status.trigger { format!("{} · {}", name, self.status.channel.map(|c| c.to_string()).unwrap_or_default()) } else { t.searching.to_string() };
-        let line = format!("{}  |  {}", state.text(t), device);
-        let y = rect.top() + 35.0;
-        painter.circle_filled(Pos2::new(x + 5.0, y), 4.5, color);
-        painter.text(Pos2::new(x + 16.0, y), Align2::LEFT_CENTER, line, FontId::proportional(14.0), p.text);
-        // The app icon at 40 px with rounded corners.
-        egui::Image::new((self.icon.id(), icon.size())).corner_radius(10).paint_at(ui, icon);
     }
 
     fn net_request(&mut self, request: flock_net::Request) {
@@ -891,9 +902,7 @@ impl SettingsApp {
 
     /// "Following the master's settings", above what a sub cannot change.
     fn follow_banner(&self, ui: &mut Ui, p: Palette, t: &Texts) {
-        ui.add_space(6.0);
-        info_box(ui, p, &format!("{}{}{}", t.net_follow_pre, self.master_name(), t.net_follow_post));
-        ui.add_space(6.0);
+        note_box(ui, p, NoteKind::Info, &format!("{}{}{}", t.net_follow_pre, self.master_name(), t.net_follow_post), None);
     }
 
     fn notice_items(&self, ui: &mut Ui, p: Palette, t: &Texts) {
@@ -901,13 +910,6 @@ impl SettingsApp {
             ui.add_space(6.0);
             ui.label(RichText::new(format!("{}. {item}", i + 1)).size(13.0).color(p.text));
         }
-    }
-
-    /// The "i" after a row's label (the row was just drawn with `labeled_row`).
-    fn row_info(&self, ui: &mut Ui, p: Palette, label: &str, id: &str, text: &str) {
-        let label_width = ui.painter().layout_no_wrap(label.into(), FontId::proportional(14.5), p.text).size().x;
-        let center = Pos2::new(ui.min_rect().left() + label_width + 14.0, ui.cursor().top() - ROW_SMALL / 2.0);
-        info_icon(ui, p, center, id, text);
     }
 
     /// Checks the port typed and, when it is fine, saves it (a port other than the
@@ -997,386 +999,11 @@ impl SettingsApp {
         });
     }
 
-    fn network_section(&mut self, ui: &mut Ui, t: &Texts, p: Palette) {
-        let poll = Duration::from_millis(500);
-        if self.net_read.elapsed() >= poll {
-            self.net_status = flock_net::read_status(crate::net::config_dir()).ok();
-            self.net_read = Instant::now();
-        }
-        if self.net_ips.0.elapsed() >= Duration::from_secs(10) {
-            self.net_ips = (Instant::now(), local_ips());
-        }
-        ui.ctx().request_repaint_after(poll);
-        let status = self.net_status.clone();
-        let net = self.cfg.network.clone();
-        let accepted = net.notice_accepted;
-        let master = net.role == flock_net::Role::Master;
-        let sub = self.follows_master();
-        let live = status.as_ref().filter(|s| s.running && net.on);
-
-        // The explanation window, and what this computer is (master or sub).
-        ui.add_space(10.0);
-        ui.horizontal(|ui| {
-            if button(ui, p, t.net_how_button, ButtonKind::Plain).clicked() {
-                self.net_how = true;
-            }
-            let badge = if master {
-                format!("{} {}/{}", t.net_badge_master, net.peers.len(), flock_net::MAX_SUBS)
-            } else {
-                let name = self.master_name();
-                format!("{} {}", t.net_badge_sub, if name.is_empty() { t.net_no_master } else { &name })
-            };
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // Clear of the page's scroll bar.
-                ui.add_space(14.0);
-                ui.label(RichText::new(badge).font(bold(13.0)).color(p.accent_text));
-            });
-        });
-
-        if !accepted {
-            section_with(ui, p, t.net_notice_title, None, None, |ui| {
-                self.notice_items(ui, p, t);
-                ui.add_space(10.0);
-                if button(ui, p, t.net_notice_accept, ButtonKind::Primary).clicked() {
-                    self.apply(|c| c.network.notice_accepted = true);
-                }
-                ui.add_space(8.0);
-            });
-        }
-        section_with(ui, p, t.section_network, None, None, |ui| {
-            let mut on = net.on && accepted;
-            ui.add_enabled_ui(accepted, |ui| {
-                if switch_row(ui, p, t.net_share, None, &mut on) {
-                    self.apply(|c| c.network.on = on);
-                }
-            });
-            hint(ui, p, if accepted { t.net_explain } else { t.net_notice_first });
-            if on {
-                if let Some(error) = status.as_ref().and_then(|s| s.me.error.as_ref()) {
-                    let error = if error == crate::net::PERMISSION_ERROR { t.net_permission_needed } else { error.as_str() };
-                    ui.colored_label(p.red, error);
-                }
-            }
-            if accepted {
-                ui.add_space(6.0);
-                let label = if self.net_notice_open { t.net_notice_hide } else { t.net_notice_review };
-                let link = ui
-                    .add(egui::Label::new(RichText::new(label).size(13.0).color(p.accent_text).underline()).sense(Sense::click()))
-                    .on_hover_cursor(egui::CursorIcon::PointingHand);
-                if link.clicked() {
-                    self.net_notice_open = !self.net_notice_open;
-                }
-                if self.net_notice_open {
-                    self.notice_items(ui, p, t);
-                }
-                ui.add_space(8.0);
-            }
-        });
-        let background = crate::main_instance_running();
-        if !background || status.as_ref().is_some_and(|s| net.on && !s.running) {
-            card(ui, p, |ui| {
-                ui.label(RichText::new(t.background_stopped).color(p.red));
-                if button(ui, p, t.background_restart, ButtonKind::Primary).clicked() {
-                    if let Err(e) = crate::net::launch_background() { self.error = Some(e.to_string()); }
-                }
-            });
-        }
-        if net.on {
-            let grants = if background { crate::net::reported_permissions() } else { None };
-            card(ui, p, |ui| {
-                for (label, granted, pane) in [
-                    (t.permission_accessibility, grants.is_some_and(|p| p.accessibility), "Privacy_Accessibility"),
-                    (t.permission_input, grants.is_some_and(|p| p.input_monitoring), "Privacy_ListenEvent"),
-                ] {
-                    ui.horizontal(|ui| {
-                        ui.label(label);
-                        ui.colored_label(if granted { p.green } else { p.red }, if granted { t.permission_granted } else { t.permission_required });
-                        if button(ui, p, t.permission_open, ButtonKind::Plain).clicked() {
-                            let _ = std::process::Command::new("open").arg(format!("x-apple.systempreferences:com.apple.preference.security?{pane}")).spawn();
-                        }
-                    });
-                }
-                hint(ui, p, t.permission_recovery);
-                if button(ui, p, t.permission_reset, ButtonKind::Plain).clicked() {
-                    if let Err(e) = crate::net::reset_permissions() { self.error = Some(e.to_string()); }
-                }
-            });
-        }
-        if let Some(pairing) = live.and_then(|s| s.pairing.as_ref()) {
-            section_with(ui, p, t.net_pairing, None, Some((&pairing.peer_name, p.accent_text)), |ui| {
-                let code = &pairing.code;
-                let shown = if code.len() == 6 && code.is_ascii() { format!("{} {}", &code[..3], &code[3..]) } else { code.clone() };
-                ui.label(RichText::new(shown).font(bold(32.0)).color(p.accent_text));
-                let reason = match pairing.reason.as_deref() {
-                    Some("both_master") => Some(t.net_reason_both_master),
-                    Some("both_sub") => Some(t.net_reason_both_sub),
-                    Some("full") => Some(t.net_reason_full),
-                    Some("has_master") => Some(t.net_reason_has_master),
-                    _ => None,
-                };
-                if let Some(reason) = reason { ui.colored_label(p.red, reason); }
-                match pairing.stage.as_str() {
-                    "done" => { ui.colored_label(p.green, t.net_done); }
-                    "failed" => { ui.colored_label(p.red, t.net_failed); }
-                    stage => {
-                        hint(ui, p, t.net_compare);
-                        hint(ui, p, if stage == "peer_accepted" { t.net_peer_accepted } else { t.net_wait });
-                        ui.horizontal(|ui| {
-                            if button(ui, p, t.net_confirm, ButtonKind::Primary).clicked() { self.net_request(flock_net::Request::Accept { accept: true }); }
-                            if button(ui, p, t.cancel, ButtonKind::Plain).clicked() { self.net_request(flock_net::Request::Accept { accept: false }); }
-                        });
-                    }
-                }
-            });
-        }
-        let labels = [t.net_computers, t.net_this_computer, t.net_crossing, t.net_keyboard_clipboard].map(str::to_string);
-        ui.add_space(10.0);
-        if let Some(i) = segments(ui, p, "network-tabs", &labels, Role::Tab, SEG_SMALL, &[], None, |i| i == self.net_tab) { self.net_tab = i; }
-        if self.net_tab == 1 {
-        section_with(ui, p, t.net_me, None, None, |ui| {
-            let width = (ui.available_width() * 0.62).min(300.0);
-            // Master or sub: only while no computer is paired.
-            let locked = !net.peers.is_empty();
-            let labels = [t.net_role_master.to_string(), t.net_role_sub.to_string()];
-            let mut picked = None;
-            ui.add_enabled_ui(!locked, |ui| {
-                labeled_row(ui, p, t.net_role, width, ROW_SMALL, |ui| {
-                    picked = segments(ui, p, "net-role", &labels, Role::RadioButton, SEG_SMALL, &[], None, |i| (i == 1) == !master);
-                    false
-                });
-            });
-            self.row_info(ui, p, t.net_role, "net-role-info", t.net_role_info);
-            if locked { hint(ui, p, t.net_role_locked); }
-            if let Some(i) = picked {
-                let role = if i == 1 { flock_net::Role::Sub } else { flock_net::Role::Master };
-                self.apply(|c| c.network.role = role);
-            }
-            divider(ui, p);
-            let mut name = net.name.clone();
-            if labeled_row(ui, p, t.net_name, width, ROW_SMALL, |ui| {
-                ui.add(egui::TextEdit::singleline(&mut name).hint_text(t.net_name_hint).desired_width(width)).changed()
-            }) { self.apply(|c| c.network.name = name); }
-            // The port is typed into a buffer and checked only on Apply.
-            let current = status.as_ref().filter(|s| s.running).map_or(net.port, |s| s.me.port);
-            let mut text = self.net_port_edit.clone().unwrap_or_else(|| net.port.to_string());
-            let (mut apply, mut default) = (false, false);
-            let port_width = (ui.available_width() * 0.8).min(400.0);
-            let typed = labeled_row(ui, p, t.net_port, port_width, ROW_SMALL, |ui| {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    default = button(ui, p, t.net_port_default, ButtonKind::Plain).clicked();
-                    apply = button(ui, p, t.net_port_apply, ButtonKind::Plain).clicked();
-                    ui.add(egui::TextEdit::singleline(&mut text).desired_width(64.0)).changed()
-                }).inner
-            });
-            if typed {
-                text.retain(|c| c.is_ascii_digit());
-                text.truncate(5);
-                self.net_port_edit = Some(text.clone());
-                self.net_port_error = None;
-            }
-            if default {
-                self.net_port_edit = Some(flock_net::DEFAULT_PORT.to_string());
-                self.try_port(t, Some(flock_net::DEFAULT_PORT), current);
-            } else if apply {
-                self.try_port(t, text.parse().ok(), current);
-            }
-            if let Some(error) = self.net_port_error {
-                ui.colored_label(p.red, error);
-            }
-            if !self.net_ips.1.is_empty() {
-                let shown: Vec<String> = self
-                    .net_ips
-                    .1
-                    .iter()
-                    .map(|ip| if net.port == flock_net::DEFAULT_PORT { ip.clone() } else { format!("{ip}:{}", net.port) })
-                    .collect();
-                hint(ui, p, &format!("{}: {}", t.net_local_ips, shown.join(", ")));
-            }
-            if let Some(s) = &status { hint(ui, p, &format!("{}: {}", t.net_id, s.me.id.get(..8).unwrap_or(&s.me.id))); }
-            ui.add_space(6.0);
-        });
-        }
-        if self.net_tab == 0 {
-        // A computer found nearby but not paired yet is "the other computer": a ghost card.
-        heading(ui, p, t.net_nearby);
-        let discovered: Vec<_> = live
-            .map(|s| s.discovered.iter().filter(|d| !d.paired && !net.peers.iter().any(|p| p.id == d.id)).cloned().collect())
-            .unwrap_or_default();
-        if discovered.is_empty() {
-            empty_card(ui, p, if net.on { t.net_empty } else { t.net_disabled });
-            ui.add_space(8.0);
-        }
-        for peer in discovered {
-            ghost_card(ui, p, |ui| {
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    ui.vertical(|ui| {
-                        ui.label(RichText::new(&peer.name).strong());
-                        hint(ui, p, &format!("{:?} · {}", peer.os, peer.addr));
-                    });
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if button(ui, p, t.net_pair, ButtonKind::Primary).clicked() { self.net_request(flock_net::Request::Pair { pair: peer.id }); }
-                    });
-                });
-                ui.add_space(6.0);
-            });
-            ui.add_space(8.0);
-        }
-        card(ui, p, |ui| {
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.net_address).hint_text(t.net_address_hint).desired_width((ui.available_width() - 110.0).max(100.0)));
-                ui.add_enabled_ui(net.on && !self.net_address.trim().is_empty(), |ui| {
-                    if button(ui, p, t.net_add_ip, ButtonKind::Plain).clicked() {
-                        let input = self.net_address.trim();
-                        let address = if let Ok(ip) = input.parse::<std::net::IpAddr>() {
-                            std::net::SocketAddr::new(ip, flock_net::NetConfig::default().port).to_string()
-                        } else { input.to_string() };
-                        if address.parse::<std::net::SocketAddr>().is_ok() { self.net_request(flock_net::Request::PairAddr { pair_addr: address }); }
-                        else { self.error = Some(t.net_address_hint.into()); }
-                    }
-                });
-            });
-            ui.add_space(6.0);
-        });
-        // Same heading as `section_with`, but each peer gets its own card below it
-        // (a computer that is not connected is a ghost card).
-        heading(ui, p, t.net_peers);
-        if net.peers.is_empty() { empty_card(ui, p, t.net_no_peers); }
-        for peer in net.peers.clone() {
-            let connected = live.and_then(|s| s.peers.iter().find(|s| s.id == peer.id)).is_some_and(|s| s.connected);
-            let body = |ui: &mut Ui| {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(&peer.name).font(bold(15.0)));
-                    let online = live.and_then(|s| s.peers.iter().find(|p| p.id == peer.id)).filter(|p| p.connected);
-                    if let Some(online) = online {
-                        let delay = online.rtt_ms.map(|ms| format!(" · {ms:.1} ms")).unwrap_or_default();
-                        ui.colored_label(p.green, format!("● {}{delay}", t.net_connected));
-                    } else { ui.colored_label(p.muted, format!("● {}", t.net_offline)); }
-                    if button(ui, p, t.net_unpair, ButtonKind::Danger).clicked() { self.net_request(flock_net::Request::Unpair { unpair: peer.id.clone() }); }
-                });
-                if !master {
-                    // The master decides where it sits; here it is only shown.
-                    let side = match peer.side {
-                        Some(flock_net::Side::Left) => t.edge_left,
-                        Some(flock_net::Side::Right) => t.edge_right,
-                        Some(flock_net::Side::Top) => t.edge_top,
-                        Some(flock_net::Side::Bottom) => t.edge_bottom,
-                        None => t.net_side_off,
-                    };
-                    hint(ui, p, &format!("{}{}{}", t.net_master_at_pre, side.to_lowercase(), t.net_master_at_post));
-                    ui.add_space(8.0);
-                    return;
-                }
-                let sides = [None, Some(flock_net::Side::Left), Some(flock_net::Side::Right), Some(flock_net::Side::Top), Some(flock_net::Side::Bottom)];
-                let labels: Vec<String> = [t.off, t.edge_left, t.edge_right, t.edge_top, t.edge_bottom].iter().map(|s| s.to_string()).collect();
-                let width = (ui.available_width() * 0.66).min(300.0);
-                // A side another sub already sits on cannot be chosen.
-                let taken: Vec<usize> = (1..sides.len())
-                    .filter(|&i| net.peers.iter().any(|o| o.id != peer.id && o.side == sides[i]))
-                    .collect();
-                let mut selected = None;
-                labeled_row(ui, p, t.net_position, width, ROW_SMALL, |ui| {
-                    selected = segments(ui, p, &format!("net-side-{}", peer.id), &labels, Role::RadioButton, SEG_SMALL, &taken, Some(0), |i| sides[i] == peer.side);
-                    false
-                });
-                if let Some(i) = selected { self.apply(|c| { if let Some(p) = c.network.peers.iter_mut().find(|p| p.id == peer.id) { p.side = sides[i]; } }); }
-            };
-            ui.push_id(&peer.id, |ui| if connected { card(ui, p, body) } else { ghost_card(ui, p, body) });
-            ui.add_space(8.0);
-        }
-        }
-        if self.net_tab >= 2 {
-        section_with(ui, p, t.net_options, None, None, |ui| {
-            if sub { self.follow_banner(ui, p, t); }
-            ui.add_enabled_ui(!sub, |ui| {
-                let width = (ui.available_width() * 0.7).min(380.0);
-                if self.net_tab == 2 {
-                if net.on && self.cfg.enabled { self.easy_switch_hint(ui, t, p); }
-                let choices: Vec<(u64, String)> = [(0, ""), (300, "0.3"), (500, "0.5"), (1000, "1"), (2000, "2")]
-                    .into_iter()
-                    .map(|(ms, text)| (ms, if ms == 0 { t.net_delay_none.to_string() } else { format!("{text}{}", t.seconds_short) }))
-                    .collect();
-                let choices: Vec<(u64, &str)> = choices.iter().map(|(ms, s)| (*ms, s.as_str())).collect();
-                let mut delay = net.cross_delay_ms;
-                if labeled_row(ui, p, t.net_delay, width, ROW_SMALL, |ui| segmented(ui, p, "net-delay", &mut delay, &choices, SEG_SMALL)) {
-                    self.apply(|c| c.network.cross_delay_ms = delay);
-                }
-                hint(ui, p, t.net_delay_hint);
-                divider(ui, p);
-                let mut control = net.require_control;
-                if switch_row(ui, p, t.net_require_control, Some(t.net_require_control_note), &mut control) { self.apply(|c| c.network.require_control = control); }
-                let mut arrival = self.cfg.locate.on && self.cfg.locate.on_arrival;
-                if switch_row(ui, p, t.net_arrival, None, &mut arrival) {
-                    self.apply(|c| {
-                        c.locate.on_arrival = arrival;
-                        if arrival { c.locate.on = true; }
-                    });
-                }
-                hint(ui, p, t.net_arrival_hint);
-                divider(ui, p);
-                }
-                if self.net_tab == 3 {
-                let mut swap = net.swap_cmd_ctrl;
-                if switch_row(ui, p, t.net_swap, None, &mut swap) { self.apply(|c| c.network.swap_cmd_ctrl = swap); }
-                let mut capslock = net.mac_capslock_to_hangul;
-                if switch_row(ui, p, t.net_mac_capslock, Some(t.net_mac_hangul_note), &mut capslock) { self.apply(|c| c.network.mac_capslock_to_hangul = capslock); }
-                let mut shift_space = net.mac_shift_space_to_hangul;
-                if switch_row(ui, p, t.net_mac_shift_space, Some(t.net_mac_hangul_note), &mut shift_space) { self.apply(|c| c.network.mac_shift_space_to_hangul = shift_space); }
-                let mut lang1 = net.lang1_on_mac != "off";
-                if switch_row(ui, p, t.net_lang1, None, &mut lang1) { self.apply(|c| c.network.lang1_on_mac = if lang1 { "capslock" } else { "off" }.into()); }
-                divider(ui, p);
-                let mut clipboard = net.share_clipboard;
-                if switch_row(ui, p, t.net_clipboard, None, &mut clipboard) { self.apply(|c| c.network.share_clipboard = clipboard); }
-                hint(ui, p, t.net_clip_hint);
-                }
-            });
-            if let Some(tr) = live.and_then(|s| s.transfer.as_ref()) {
-                let mb = |bytes: u64| bytes as f64 / 1_048_576.0;
-                let line = match tr.stage.as_str() {
-                    "running" => Some((
-                        format!("{} {:.1} / {:.1} MB", if tr.direction == "send" { t.net_sending } else { t.net_receiving }, mb(tr.done_bytes), mb(tr.total_bytes)),
-                        p.muted,
-                    )),
-                    "done" if tr.direction == "receive" && tr.kind == "files" => {
-                        Some((format!("{} {}", t.net_received, tr.saved_in.clone().unwrap_or_default()), p.green))
-                    }
-                    "too_large" => Some((t.net_too_large.to_string(), p.amber)),
-                    "failed" => Some((t.net_transfer_failed.to_string(), p.red)),
-                    _ => None,
-                };
-                if let Some((text, color)) = line {
-                    ui.add_space(4.0);
-                    ui.label(RichText::new(text).size(12.5).color(color));
-                }
-            }
-            divider(ui, p);
-            hint(ui, p, t.net_return);
-            ui.add_space(6.0);
-        });
-        }
-    }
-
-    /// The countdown effect rows and the cursor highlight, side by side.
-    fn effects_section(&mut self, ui: &mut Ui, t: &Texts, p: Palette) {
-        ui.add_space(12.0);
-        info_box(ui, p, t.effects_help);
-        two_columns(ui, |left, right| {
-            self.edge_effects_card(left, t, p);
-            self.locate_section(right, t, p);
-            self.haptics_summary(right, t, p);
-        });
-    }
-
-    /// The countdown effect: which one, and its look. A sub shows the master's settings.
+    /// The countdown effect: which one, and its look. A sub shows the master's settings
+    /// (the page says so once and turns the rows off).
     fn edge_effects_card(&mut self, ui: &mut Ui, t: &Texts, p: Palette) {
-        let sub = self.follows_master();
-        section(ui, p, t.section_edge_effects, |ui| {
-            if sub {
-                self.follow_banner(ui, p, t);
-            }
-            ui.add_enabled_ui(!sub, |ui| self.edge_anim_rows(ui, t, p));
+        section_with(ui, p, t.section_edge_effects, None, Some((t.fx_saved_each, p.muted)), |ui| {
+            self.edge_anim_rows(ui, t, p);
             ui.add_space(8.0);
         });
     }
@@ -1558,7 +1185,7 @@ impl SettingsApp {
         let recording = self.recording == Some(n);
         let failed = !recording && !key.is_empty() && self.status.hotkeys_failed.contains(&n);
         let (shown, color) = if recording {
-            (t.hotkey_press.to_string(), p.accent)
+            (t.hotkey_press.to_string(), p.amber)
         } else if key.is_empty() {
             (t.hotkey_none.to_string(), p.muted)
         } else {
@@ -1598,12 +1225,9 @@ impl SettingsApp {
 
     /// Highlighting the cursor: on/off, the effect, and what brings it up.
     fn locate_section(&mut self, ui: &mut Ui, t: &Texts, p: Palette) {
-        let sub = self.follows_master();
         section(ui, p, t.section_locate, |ui| {
-            if sub {
-                self.follow_banner(ui, p, t);
-            }
-            ui.add_enabled_ui(!sub, |ui| self.locate_rows(ui, t, p));
+            self.locate_rows(ui, t, p);
+            ui.add_space(8.0);
         });
     }
 
@@ -1652,7 +1276,7 @@ impl SettingsApp {
             }
             divider(ui, p);
             let mut on = self.cfg.locate.on_shake;
-            if switch_row(ui, p, t.locate_shake, None, &mut on) {
+            if switch_row(ui, p, t.locate_shake, Some(t.shake_help_mac), &mut on) {
                 self.apply(|c| c.locate.on_shake = on);
             }
             if self.cfg.locate.on_shake {
@@ -1681,13 +1305,11 @@ impl SettingsApp {
 
     /// The language, and starting at login.
     fn preferences_card(&mut self, ui: &mut Ui, t: &Texts, p: Palette) {
-        ui.add_space(10.0);
-        card(ui, p, |ui| {
+        section(ui, p, t.general_basic, |ui| {
             let mut language = self.cfg.language.clone();
             let choices = [("ko", "한국어"), ("en", "English")];
-            let width = (ui.available_width() * 0.62).min(250.0);
             let mut chosen = language.as_str();
-            if labeled_row(ui, p, t.language, width, ROW_SMALL, |ui| segmented(ui, p, "language", &mut chosen, &choices, SEG_SMALL)) {
+            if labeled_row(ui, p, t.language, 210.0, ROW_SMALL, |ui| segmented(ui, p, "language", &mut chosen, &choices, SEG_SMALL)) {
                 language = chosen.to_string();
                 self.apply(|c| c.language = language);
             }
@@ -1706,8 +1328,7 @@ impl SettingsApp {
 
     /// Putting the settings back, and uninstalling.
     fn maintenance_card(&mut self, ui: &mut Ui, t: &Texts, p: Palette) {
-        ui.add_space(10.0);
-        card(ui, p, |ui| {
+        section(ui, p, t.section_reset, |ui| {
             let labels: &[(&str, ButtonKind)] = if self.confirm_reset {
                 &[(t.reset_confirm, ButtonKind::DangerFilled), (t.cancel, ButtonKind::Plain)]
             } else {
@@ -1742,67 +1363,60 @@ impl SettingsApp {
         }
     }
 
-    /// Current version, the new one if any, and the automatic check.
+    /// Current version, the new one if any with "Update now", and the automatic checks.
     fn update_section(&mut self, ui: &mut Ui, t: &Texts, p: Palette) {
         let state = self.update.lock().unwrap().clone();
         let ctx = ui.ctx().clone();
+        let current = env!("CARGO_PKG_VERSION");
         section(ui, p, t.section_update, |ui| {
-            ui.add_space(10.0);
-            let (status, color) = match &state {
-                UpdateUi::Idle => (String::new(), p.muted),
-                UpdateUi::Checking => (t.update_checking.to_string(), p.muted),
-                UpdateUi::UpToDate => (t.update_up_to_date.to_string(), p.green),
-                UpdateUi::Available(r) => (format!("{} {}", t.update_available, r.version), p.accent_text),
-                UpdateUi::Failed(_) => (t.update_failed.to_string(), p.amber),
-                UpdateUi::Downloading => (t.update_downloading.to_string(), p.muted),
-                UpdateUi::Installing => (t.update_installing.to_string(), p.muted),
-                UpdateUi::Installed(_) => (t.update_installed.to_string(), p.green),
-                UpdateUi::Downloaded(..) => (t.update_downloaded.to_string(), p.green),
-                UpdateUi::UpdateFailed(..) => (t.update_install_failed.to_string(), p.amber),
+            let busy = matches!(state, UpdateUi::Checking | UpdateUi::Downloading | UpdateUi::Installing | UpdateUi::Installed(_));
+            let version_line = format!("{} {current}", t.update_current);
+            let (title, help) = match &state {
+                UpdateUi::Available(r) | UpdateUi::UpdateFailed(r, _) => {
+                    (crate::i18n::fill(t.update_new, &[&r.version]), crate::i18n::fill(t.update_new_help, &[current]))
+                }
+                UpdateUi::Idle => (version_line, String::new()),
+                UpdateUi::Checking => (version_line, t.update_checking.to_string()),
+                UpdateUi::UpToDate => (version_line, t.update_up_to_date.to_string()),
+                UpdateUi::Failed(_) => (version_line, t.update_failed.to_string()),
+                UpdateUi::Downloading => (version_line, t.update_downloading.to_string()),
+                UpdateUi::Installing => (version_line, t.update_installing.to_string()),
+                UpdateUi::Installed(_) => (version_line, t.update_installed.to_string()),
+                UpdateUi::Downloaded(..) => (version_line, t.update_downloaded.to_string()),
             };
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("{} {}", t.update_current, env!("CARGO_PKG_VERSION"))).size(14.0));
+            let labels: Vec<(&str, ButtonKind)> = match &state {
+                UpdateUi::Available(..) | UpdateUi::UpdateFailed(..) => vec![(t.update_install, ButtonKind::Primary), (t.update_page, ButtonKind::Plain)],
+                UpdateUi::Downloaded(..) => vec![(t.update_show, ButtonKind::Plain)],
+                _ if busy => vec![],
+                _ => vec![(t.update_page, ButtonKind::Plain), (t.update_check, ButtonKind::Plain)],
+            };
+            let width = labels.iter().map(|(l, k)| button_width(ui, l, *k)).sum::<f32>() + 8.0 * labels.len().saturating_sub(1) as f32;
+            let mut clicked = None;
+            labeled_row_help(ui, p, &title, Some(&help).filter(|h| !h.is_empty()).map(String::as_str), width.max(10.0), |ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new(status).size(13.0).color(color));
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    for (i, (label, kind)) in labels.iter().enumerate() {
+                        if button(ui, p, label, *kind).clicked() {
+                            clicked = Some(i);
+                        }
+                    }
                 });
+                false
             });
+            match (&state, clicked) {
+                (UpdateUi::Available(r) | UpdateUi::UpdateFailed(r, _), Some(0)) => self.start_install(&ctx, r.clone()),
+                (UpdateUi::Available(r) | UpdateUi::UpdateFailed(r, _), Some(_)) => update::open_url(&r.page),
+                (UpdateUi::Downloaded(path, _), Some(_)) => update::reveal(path),
+                (_, Some(0)) => update::open_url(update::RELEASES_PAGE),
+                (_, Some(_)) => self.check_update(&ctx),
+                _ => {}
+            }
             match &state {
-                UpdateUi::Failed(why) | UpdateUi::UpdateFailed(_, why) => hint(ui, p, why),
+                UpdateUi::Failed(why) => hint(ui, p, why),
+                UpdateUi::UpdateFailed(_, why) => hint(ui, p, &format!("{}: {why}", t.update_install_failed)),
                 UpdateUi::Downloaded(_, why) => hint(ui, p, &format!("{}: {why}", t.update_only_downloaded)),
                 _ => {}
             }
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 8.0;
-                match &state {
-                    UpdateUi::Available(r) | UpdateUi::UpdateFailed(r, _) => {
-                        if button(ui, p, t.update_install, ButtonKind::Primary).clicked() {
-                            self.start_install(&ctx, r.clone());
-                        }
-                        if button(ui, p, t.update_page, ButtonKind::Plain).clicked() {
-                            update::open_url(&r.page);
-                        }
-                    }
-                    UpdateUi::Downloaded(path, _) => {
-                        if button(ui, p, t.update_show, ButtonKind::Plain).clicked() {
-                            update::reveal(path);
-                        }
-                    }
-                    // Nothing to press meanwhile; the row keeps its height so the card stays put.
-                    UpdateUi::Checking | UpdateUi::Downloading | UpdateUi::Installing | UpdateUi::Installed(_) => {
-                        ui.allocate_exact_size(Vec2::new(0.0, CONTROL_HEIGHT), Sense::hover());
-                    }
-                    _ => {
-                        if button(ui, p, t.update_check, ButtonKind::Plain).clicked() {
-                            self.check_update(&ctx);
-                        }
-                        if button(ui, p, t.update_page, ButtonKind::Plain).clicked() {
-                            update::open_url(update::RELEASES_PAGE);
-                        }
-                    }
-                }
-            });
-            ui.add_space(6.0);
             divider(ui, p);
             let mut on = self.cfg.check_updates;
             let (flipped, label) = switch_row_full(ui, p, t.update_auto, None, &mut on);
@@ -2226,7 +1840,7 @@ impl SettingsApp {
     }
 
     fn uninstall_result(&mut self, ui: &mut Ui, t: &Texts, p: Palette) {
-        self.header(ui, t, p);
+        ui.label(RichText::new(crate::APP_NAME).font(bold(19.0)).color(p.text));
         ui.add_space(16.0);
         card(ui, p, |ui| {
             ui.add_space(12.0);
@@ -2258,19 +1872,6 @@ fn home_relative(path: &std::path::Path) -> String {
 }
 
 // ---- Building blocks -------------------------------------------------------------
-
-/// Two columns side by side, each with the normal spacing inside.
-fn two_columns(ui: &mut Ui, add: impl FnOnce(&mut Ui, &mut Ui)) {
-    ui.scope(|ui| {
-        ui.spacing_mut().item_spacing.x = 28.0;
-        ui.columns(2, |columns| {
-            let (left, right) = columns.split_at_mut(1);
-            left[0].spacing_mut().item_spacing.x = 8.0;
-            right[0].spacing_mut().item_spacing.x = 8.0;
-            add(&mut left[0], &mut right[0]);
-        });
-    });
-}
 
 /// A round button showing one colour, ringed when it is the current one.
 fn color_swatch(ui: &mut Ui, p: Palette, [r, g, b]: [u8; 3], selected: bool) -> Response {
@@ -2340,7 +1941,7 @@ fn how_diagram(ui: &mut Ui, p: Palette, t: &Texts) {
     // The way back runs under the boxes, from the last to the first.
     let (start, end) = (Pos2::new(boxes[2].center().x, boxes[2].bottom() + 4.0), Pos2::new(boxes[0].center().x, boxes[0].bottom() + 4.0));
     let low = rect.top() + h + 30.0;
-    let back = Stroke::new(2.2, p.accent);
+    let back = Stroke::new(2.2, p.text);
     painter.line_segment([start, Pos2::new(start.x, low)], back);
     painter.line_segment([Pos2::new(start.x, low), Pos2::new(end.x, low)], back);
     painter.line_segment([Pos2::new(end.x, low), end], back);
@@ -2409,54 +2010,235 @@ fn ghost_shapes(rect: Rect, radius: f32, p: Palette) -> Vec<Shape> {
     shapes
 }
 
-/// The small muted title above a card.
-fn heading(ui: &mut Ui, p: Palette, title: &str) {
-    ui.add_space(10.0);
-    ui.horizontal(|ui| {
-        ui.add_space(4.0);
-        ui.label(RichText::new(title).font(bold(13.0)).color(p.muted));
-    });
-    ui.add_space(2.0);
+/// Space between the blocks of a page.
+const BLOCK_GAP: f32 = 16.0;
+
+fn gap(ui: &mut Ui) {
+    ui.add_space(BLOCK_GAP);
+}
+
+/// The title of a page and, under it, one line saying what it is for; a button may sit
+/// at the right end (true when pressed).
+fn page_header(ui: &mut Ui, p: Palette, title: &str, help: &str, button_label: Option<&str>) -> bool {
+    let width = ui.available_width();
+    let button_w = button_label.map_or(0.0, |l| button_width(ui, l, ButtonKind::Plain));
+    let text_w = (width - button_w - 16.0).max(120.0);
+    let help = ui.painter().layout(help.to_string(), FontId::proportional(13.0), p.muted, text_w);
+    let height = (30.0 + help.size().y + 4.0).max(52.0);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
+    let painter = ui.painter();
+    painter.text(rect.left_top() + Vec2::new(0.0, 2.0), Align2::LEFT_TOP, title, bold(20.0), p.text);
+    painter.galley(rect.left_top() + Vec2::new(0.0, 30.0), help, p.muted);
+    let mut pressed = false;
+    if let Some(label) = button_label {
+        let area = Rect::from_min_size(Pos2::new(rect.right() - button_w, rect.bottom() - CONTROL_HEIGHT - 2.0), Vec2::new(button_w, CONTROL_HEIGHT));
+        ui.new_child(UiBuilder::new().max_rect(area)).scope(|ui| pressed = button(ui, p, label, ButtonKind::Plain).clicked());
+    }
+    pressed
+}
+
+/// The small muted title above a box. Every one is `SECTION_HEAD` tall, whatever sits
+/// at its right end (`right` is laid out right to left), so boxes side by side start on
+/// one line.
+fn section_head(ui: &mut Ui, p: Palette, title: &str, info: Option<&str>, right: impl FnOnce(&mut Ui)) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), SECTION_HEAD), Sense::hover());
+    let mut inner = ui.new_child(
+        UiBuilder::new().max_rect(rect.shrink2(Vec2::new(4.0, 0.0))).layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    let label = inner.label(RichText::new(title).font(bold(13.0)).color(p.muted));
+    if let Some(text) = info {
+        let (r, _) = inner.allocate_exact_size(Vec2::new(20.0, label.rect.height()), Sense::hover());
+        info_icon(&mut inner, p, r.center(), title, text);
+    }
+    inner.with_layout(egui::Layout::right_to_left(egui::Align::Center), right);
+    ui.add_space(6.0);
+}
+
+/// A short note in `color` at the right end of a section header.
+fn head_note(ui: &mut Ui, text: &str, color: Color32) {
+    ui.add(egui::Label::new(RichText::new(text).size(12.0).color(color)).truncate());
 }
 
 fn section(ui: &mut Ui, p: Palette, title: &str, add: impl FnOnce(&mut Ui)) {
     section_with(ui, p, title, None, None, add);
 }
 
-/// `section` with an "i" after the title explaining `info`, and a short `note` in its
-/// colour at the right end of the title line.
+/// A header and a card under it. `info` adds an "i" after the title explaining it, and
+/// `note` a short text in its colour at the right end.
 fn section_with(ui: &mut Ui, p: Palette, title: &str, info: Option<&str>, note: Option<(&str, Color32)>, add: impl FnOnce(&mut Ui)) {
-    ui.add_space(10.0);
-    ui.horizontal(|ui| {
-        ui.add_space(4.0);
-        let label = ui.label(RichText::new(title).font(bold(13.0)).color(p.muted));
-        if let Some(text) = info {
-            let (rect, _) = ui.allocate_exact_size(Vec2::new(20.0, label.rect.height()), Sense::hover());
-            info_icon(ui, p, rect.center(), title, text);
-        }
+    section_head(ui, p, title, info, |ui| {
         if let Some((text, color)) = note {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_space(4.0);
-                ui.add(egui::Label::new(RichText::new(text).size(12.0).color(color)).truncate());
-            });
+            head_note(ui, text, color);
         }
     });
-    ui.add_space(2.0);
     card(ui, p, add);
 }
 
+/// What a column of `two_cols` asks its card to do: grow to `target`, and report its own
+/// height in `slot`.
+#[derive(Clone, Copy)]
+struct Fill {
+    target: f32,
+    top: f32,
+    slot: egui::Id,
+}
+
+impl Default for Fill {
+    fn default() -> Self {
+        Fill { target: 0.0, top: 0.0, slot: egui::Id::NULL }
+    }
+}
+
+/// Two columns side by side, each holding a section (`section_head` and one card). The
+/// cards end on the same line: each frame the taller one's height is remembered and the
+/// other card grows to it. `add` gets the left and the right column.
+fn two_cols(ui: &mut Ui, name: &str, add: impl FnOnce(&mut Ui, &mut Ui)) {
+    let id = ui.scope_id().with(("two-cols", name));
+    let (hl, hr) = ui.data(|d| d.get_temp::<(f32, f32)>(id)).unwrap_or((0.0, 0.0));
+    let target = hl.max(hr);
+    let gutter = 16.0;
+    let width = ui.available_width();
+    let col_w = ((width - gutter) / 2.0).floor();
+    let top = ui.cursor().min;
+    let rect = |i: f32| Rect::from_min_size(top + Vec2::new(i * (col_w + gutter), 0.0), Vec2::new(col_w, 4000.0));
+    let mut l = ui.new_child(UiBuilder::new().id_salt(("col", 0)).max_rect(rect(0.0)));
+    let mut r = ui.new_child(UiBuilder::new().id_salt(("col", 1)).max_rect(rect(1.0)));
+    for (i, col) in [&mut l, &mut r].into_iter().enumerate() {
+        let fill = Fill { target, top: top.y, slot: id.with(i) };
+        let key = col.scope_id();
+        col.data_mut(|d| d.insert_temp(key, fill));
+    }
+    add(&mut l, &mut r);
+    let natural = |col: &Ui, i: usize| col.data(|d| d.get_temp::<f32>(id.with(i))).unwrap_or(col.min_rect().height());
+    let heights = (natural(&l, 0), natural(&r, 1));
+    if (heights.0 - hl).abs() > 0.5 || (heights.1 - hr).abs() > 0.5 {
+        ui.data_mut(|d| d.insert_temp(id, heights));
+        ui.ctx().request_repaint();
+    }
+    let bottom = l.min_rect().bottom().max(r.min_rect().bottom());
+    ui.allocate_rect(Rect::from_min_max(top, Pos2::new(top.x + width, bottom)), Sense::hover());
+}
+
 fn card(ui: &mut Ui, p: Palette, add: impl FnOnce(&mut Ui)) {
+    card_with(ui, p, Margin::symmetric(18, 6), add);
+}
+
+/// A card with room around its content (a map, a form), not rows.
+fn card_pad(ui: &mut Ui, p: Palette, add: impl FnOnce(&mut Ui)) {
+    card_with(ui, p, Margin::symmetric(18, 16), add);
+}
+
+fn card_with(ui: &mut Ui, p: Palette, margin: Margin, add: impl FnOnce(&mut Ui)) {
+    // In a `two_cols` column: grow to the line the taller card ends on.
+    let key = ui.scope_id();
+    let fill = ui.data(|d| d.get_temp::<Fill>(key));
+    if fill.is_some() {
+        ui.data_mut(|d| d.remove_temp::<Fill>(key));
+    }
     egui::Frame::new()
         .fill(p.card)
         .stroke(Stroke::new(1.0, p.border))
         .shadow(p.card_shadow())
         .corner_radius(16)
-        .inner_margin(Margin::symmetric(18, 6))
+        .inner_margin(margin)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.spacing_mut().item_spacing.y = 0.0;
             add(ui);
+            if let Some(fill) = fill {
+                let natural = ui.cursor().top() + f32::from(margin.bottom) - fill.top;
+                ui.data_mut(|d| d.insert_temp(fill.slot, natural));
+                ui.add_space((fill.target - natural).max(0.0));
+            }
         });
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum NoteKind {
+    Info,
+    Warn,
+    Error,
+}
+
+/// A rounded note with a mark at the left and, if asked, a button at the right (true
+/// when pressed).
+fn note_box(ui: &mut Ui, p: Palette, kind: NoteKind, text: &str, button_label: Option<&str>) -> bool {
+    let (fill, color) = match kind {
+        NoteKind::Info => (p.track.gamma_multiply(if p.dark { 0.7 } else { 0.8 }), p.text.gamma_multiply(0.85)),
+        NoteKind::Warn => (p.amber.gamma_multiply(0.15), if p.dark { p.amber } else { p.amber.lerp_to_gamma(Color32::BLACK, 0.4) }),
+        NoteKind::Error => (p.red.gamma_multiply(0.12), p.red),
+    };
+    let width = ui.available_width();
+    let button_w = button_label.map_or(0.0, |l| button_width(ui, l, ButtonKind::Plain) + 12.0);
+    let text_w = (width - 32.0 - 28.0 - button_w).max(100.0);
+    let galley = ui.painter().layout(text.to_string(), FontId::proportional(13.0), color, text_w);
+    let height = (galley.size().y + 24.0).max(46.0);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, 12, fill);
+    let c = Pos2::new(rect.left() + 24.0, rect.center().y);
+    painter.circle_stroke(c, 7.5, Stroke::new(1.4, color));
+    painter.circle_filled(c + Vec2::new(0.0, -3.0), 1.1, color);
+    painter.line_segment([c + Vec2::new(0.0, -0.8), c + Vec2::new(0.0, 3.6)], Stroke::new(1.5, color));
+    painter.galley(Pos2::new(rect.left() + 44.0, rect.center().y - galley.size().y / 2.0), galley, color);
+    let mut pressed = false;
+    if let Some(label) = button_label {
+        let w = button_w - 12.0;
+        let area = Rect::from_center_size(Pos2::new(rect.right() - 16.0 - w / 2.0, rect.center().y), Vec2::new(w, CONTROL_HEIGHT));
+        ui.new_child(UiBuilder::new().max_rect(area)).scope(|ui| pressed = button(ui, p, label, ButtonKind::Plain).clicked());
+    }
+    pressed
+}
+
+/// A key as a small keycap.
+fn keycap(ui: &mut Ui, p: Palette, text: &str) {
+    let galley = ui.painter().layout_no_wrap(text.to_string(), FontId::monospace(12.0), p.text);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(galley.size().x + 14.0, 22.0), Sense::hover());
+    ui.painter().rect_filled(rect, 5, p.card);
+    ui.painter().rect_stroke(rect, 5, Stroke::new(1.0, p.track), StrokeKind::Inside);
+    ui.painter().galley(rect.center() - galley.size() / 2.0, galley, p.text);
+}
+
+/// A small switch (a paired computer's "send from this computer"). True when flipped.
+fn mini_switch(ui: &mut Ui, p: Palette, label: &str, on: &mut bool) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(32.0, 20.0), Sense::click());
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    resp.widget_info(|| WidgetInfo::selected(Role::Switch, true, *on, label));
+    if resp.clicked() {
+        *on = !*on;
+    }
+    let how_on = ui.ctx().animate_bool_responsive(resp.id, *on);
+    let painter = ui.painter();
+    painter.rect_filled(rect, 10, p.off.lerp_to_gamma(p.strong, how_on));
+    let x = egui::lerp(rect.left() + 10.0..=rect.right() - 10.0, how_on);
+    painter.circle_filled(Pos2::new(x, rect.center().y), 7.5, Color32::WHITE.lerp_to_gamma(p.on_strong, how_on));
+    resp.clicked()
+}
+
+/// A drop-down `width` wide. Returns true on change.
+fn combo_w<T: PartialEq + Copy>(ui: &mut Ui, name: &str, value: &mut T, options: &[(T, &str)], width: f32) -> bool {
+    let shown = options.iter().find(|(v, _)| v == value).map_or("", |(_, l)| *l);
+    let mut changed = false;
+    egui::ComboBox::from_id_salt(name).selected_text(shown).width(width).show_ui(ui, |ui| {
+        for (v, label) in options {
+            changed |= ui.selectable_value(value, *v, *label).changed();
+        }
+    });
+    changed
+}
+
+/// "macOS", "Windows"...: a system's name as shown.
+fn os_label(os: flock_net::Os) -> &'static str {
+    match os {
+        flock_net::Os::Mac => "macOS",
+        flock_net::Os::Windows => "Windows",
+        flock_net::Os::Linux => "Linux",
+        flock_net::Os::Android => "Android",
+    }
+}
+
+fn mono(size: f32) -> FontId {
+    FontId::monospace(size)
 }
 
 /// A card for "the other computer" (an offline one, one not yet paired, an empty list):
@@ -2474,18 +2256,6 @@ fn ghost_card(ui: &mut Ui, p: Palette, add: impl FnOnce(&mut Ui)) {
 /// A ghost card holding only a line saying there is nothing here yet.
 fn empty_card(ui: &mut Ui, p: Palette, text: &str) {
     ghost_card(ui, p, |ui| empty(ui, p, text));
-}
-
-/// A quiet box of explanation text.
-fn info_box(ui: &mut Ui, p: Palette, text: &str) {
-    egui::Frame::new()
-        .fill(p.card.gamma_multiply(0.5))
-        .corner_radius(12)
-        .inner_margin(Margin::symmetric(14, 10))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.label(RichText::new(text).size(12.5).color(p.muted));
-        });
 }
 
 /// A thin line between rows, edge to edge inside the card, with room above and below so
@@ -2518,22 +2288,25 @@ fn switch_row(ui: &mut Ui, p: Palette, label: &str, note: Option<&str>, on: &mut
 }
 
 /// `switch_row`, also giving where its label was drawn (to put something after it).
+/// A long `note` wraps under the label.
 fn switch_row_full(ui: &mut Ui, p: Palette, label: &str, note: Option<&str>, on: &mut bool) -> (bool, Rect) {
-    let h = if note.is_some() { 50.0 } else { 40.0 };
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), h), Sense::click());
+    let width = ui.available_width();
+    let note = note.map(|n| ui.painter().layout(n.to_string(), FontId::proportional(12.5), p.muted, (width - 40.0 - 24.0).max(60.0)));
+    let h = note.as_ref().map_or(40.0, |g| (18.0 + 4.0 + g.size().y + 18.0).max(50.0));
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, h), Sense::click());
     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
     resp.widget_info(|| WidgetInfo::selected(Role::Switch, true, *on, label));
     if resp.clicked() {
         *on = !*on;
     }
     let painter = ui.painter();
-    let left = Pos2::new(rect.left(), rect.center().y);
     let label_rect = match note {
         Some(note) => {
-            painter.text(left + Vec2::new(0.0, 3.0), Align2::LEFT_TOP, note, FontId::proportional(12.5), p.muted);
-            painter.text(left - Vec2::new(0.0, 1.0), Align2::LEFT_BOTTOM, label, FontId::proportional(14.5), p.text)
+            let top = rect.center().y - (18.0 + 4.0 + note.size().y) / 2.0;
+            painter.galley(Pos2::new(rect.left(), top + 22.0), note, p.muted);
+            painter.text(Pos2::new(rect.left(), top), Align2::LEFT_TOP, label, FontId::proportional(14.5), p.text)
         }
-        None => painter.text(left, Align2::LEFT_CENTER, label, FontId::proportional(14.5), p.text),
+        None => painter.text(Pos2::new(rect.left(), rect.center().y), Align2::LEFT_CENTER, label, FontId::proportional(14.5), p.text),
     };
 
     let how_on = ui.ctx().animate_bool_responsive(resp.id, *on);
@@ -2545,10 +2318,10 @@ fn switch_row_full(ui: &mut Ui, p: Palette, label: &str, note: Option<&str>, on:
 /// The switch itself, `how_on` from 0 (off) to 1 (on): a gray track that turns lime, and
 /// a white knob with a faint ink outline so it reads on the light ground.
 fn paint_switch(painter: &egui::Painter, p: Palette, track: Rect, how_on: f32) {
-    painter.rect_filled(track, 12, p.off.lerp_to_gamma(p.accent, how_on));
+    painter.rect_filled(track, 12, p.off.lerp_to_gamma(p.strong, how_on));
     let x = egui::lerp(track.left() + 12.0..=track.right() - 12.0, how_on);
     let knob = Pos2::new(x, track.center().y);
-    painter.circle_filled(knob, 9.5, Color32::WHITE);
+    painter.circle_filled(knob, 9.5, Color32::WHITE.lerp_to_gamma(p.on_strong, how_on));
     painter.circle_stroke(knob, 9.5, Stroke::new(1.0, p.ink.gamma_multiply(0.10)));
 }
 
@@ -2572,8 +2345,8 @@ fn info_icon(ui: &mut Ui, p: Palette, center: Pos2, id: &str, text: &str) {
 
 const ROW_SMALL: f32 = 42.0;
 
-/// A row `height` tall with a bold label on the left and a control `width` wide on the
-/// right.
+/// A row at least `height` tall with a label on the left and a control `width` wide on
+/// the right.
 fn labeled_row(
     ui: &mut Ui,
     p: Palette,
@@ -2582,12 +2355,72 @@ fn labeled_row(
     height: f32,
     control: impl FnOnce(&mut Ui) -> bool,
 ) -> bool {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
-    // The same text as a switch row's label, so the rows of a card read alike.
-    ui.painter().text(Pos2::new(rect.left(), rect.center().y), Align2::LEFT_CENTER, label, FontId::proportional(14.5), p.text);
+    row_with_help(ui, p, label, None, None, width, height, CONTROL_HEIGHT + 2.0, control)
+}
+
+/// `labeled_row` with a line of help under the label.
+fn labeled_row_help(
+    ui: &mut Ui,
+    p: Palette,
+    label: &str,
+    help: Option<&str>,
+    width: f32,
+    control: impl FnOnce(&mut Ui) -> bool,
+) -> bool {
+    row_with_help(ui, p, label, help, None, width, ROW_SMALL, CONTROL_HEIGHT + 2.0, control)
+}
+
+/// `labeled_row_help` with an "i" after the label explaining `info`.
+fn labeled_row_info(
+    ui: &mut Ui,
+    p: Palette,
+    label: &str,
+    help: Option<&str>,
+    info: &str,
+    width: f32,
+    control: impl FnOnce(&mut Ui) -> bool,
+) -> bool {
+    row_with_help(ui, p, label, help, Some(info), width, ROW_SMALL, CONTROL_HEIGHT + 2.0, control)
+}
+
+/// The row itself. The label and the help wrap in the room the control leaves; the row
+/// is as tall as they need, at least `height` and `control_height`.
+#[allow(clippy::too_many_arguments)]
+fn row_with_help(
+    ui: &mut Ui,
+    p: Palette,
+    label: &str,
+    help: Option<&str>,
+    info: Option<&str>,
+    width: f32,
+    height: f32,
+    control_height: f32,
+    control: impl FnOnce(&mut Ui) -> bool,
+) -> bool {
+    let avail = ui.available_width();
+    // Never so wide that the label is left with a sliver.
+    let width = width.min(avail * 0.64);
+    let text_w = (avail - width - 16.0).max(80.0);
+    let label_g = ui.painter().layout(label.to_string(), FontId::proportional(14.5), p.text, text_w);
+    let help_g = help.map(|h| ui.painter().layout(h.to_string(), FontId::proportional(12.5), p.muted, text_w));
+    let text_h = label_g.size().y + help_g.as_ref().map_or(0.0, |g| 3.0 + g.size().y);
+    let h = height.max(text_h + 18.0).max(control_height + 12.0);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(avail, h), Sense::hover());
+    let top = rect.center().y - text_h / 2.0;
+    let painter = ui.painter();
+    let label_h = label_g.size().y;
+    let label_right = label_g.rows.first().map_or(0.0, |r| r.rect().right());
+    painter.galley(Pos2::new(rect.left(), top), label_g, p.text);
+    if let Some(text) = info {
+        info_icon(ui, p, Pos2::new(rect.left() + label_right + 16.0, top + label_h / 2.0), label, text);
+    }
+    let painter = ui.painter();
+    if let Some(g) = help_g {
+        painter.galley(Pos2::new(rect.left(), top + label_h + 3.0), g, p.muted);
+    }
     let area = Rect::from_min_max(
-        Pos2::new(rect.right() - width, rect.center().y - 15.0),
-        Pos2::new(rect.right(), rect.center().y + 15.0),
+        Pos2::new(rect.right() - width, rect.center().y - control_height / 2.0),
+        Pos2::new(rect.right(), rect.center().y + control_height / 2.0),
     );
     // A child, not a scope: a scope would pull the cursor back up to the control's
     // bottom, and the next row or divider would crowd it.
@@ -2600,7 +2433,6 @@ struct SegSize {
     height: f32,
     text: f32,
 }
-const SEG_NORMAL: SegSize = SegSize { height: 30.0, text: 14.0 };
 /// Every button, drop-down and segment bar inside a card is this tall.
 const CONTROL_HEIGHT: f32 = 28.0;
 /// Buttons are at least this wide, so short labels line up with long ones.
@@ -2625,8 +2457,25 @@ fn segments(
     size: SegSize,
     // Segments shown but not clickable (a side another computer already sits on).
     locked: &[usize],
-    // The "Off" segment: chosen, it is drawn gray instead of in the accent colour.
+    // The "Off" segment: chosen, it is drawn gray instead of raised.
     off: Option<usize>,
+    selected: impl Fn(usize) -> bool,
+) -> Option<usize> {
+    segments_styled(ui, p, name, labels, role, size, locked, off, false, selected)
+}
+
+/// `segments`; with `lime` the chosen segment is lime (the computer's role, nothing else).
+#[allow(clippy::too_many_arguments)]
+fn segments_styled(
+    ui: &mut Ui,
+    p: Palette,
+    name: &str,
+    labels: &[String],
+    role: Role,
+    size: SegSize,
+    locked: &[usize],
+    off: Option<usize>,
+    lime: bool,
     selected: impl Fn(usize) -> bool,
 ) -> Option<usize> {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), size.height), Sense::hover());
@@ -2656,14 +2505,19 @@ fn segments(
             (locked_fill(p), p.muted)
         } else if on && off == Some(i) {
             (p.off, p.text)
-        } else if on {
+        } else if on && lime {
             (p.accent, p.ink)
+        } else if on {
+            (p.seg_on, p.text)
         } else if resp.hovered() {
             (p.hover, p.text)
         } else {
             (Color32::TRANSPARENT, p.muted)
         };
         painter.rect_filled(seg, 7, fill);
+        if on && !lime && off != Some(i) && !locked {
+            painter.rect_stroke(seg, 7, Stroke::new(1.0, p.border), StrokeKind::Inside);
+        }
         if locked {
             // A faint inner shadow: pressed in, not pressable.
             painter.rect_stroke(seg, 7, Stroke::new(1.5, Color32::from_black_alpha(45)), StrokeKind::Inside);
@@ -2812,8 +2666,8 @@ fn choice_row(ui: &mut Ui, p: Palette, selected: bool, row: &Row) -> Response {
 
     let c = Pos2::new(rect.left() + 10.0, rect.center().y);
     if selected {
-        painter.circle_filled(c, 10.0, p.accent);
-        painter.circle_filled(c, 4.0, p.ink);
+        painter.circle_filled(c, 10.0, p.strong);
+        painter.circle_filled(c, 4.0, p.on_strong);
     } else {
         painter.circle_stroke(c, 9.25, Stroke::new(1.5, p.off));
     }
@@ -2878,8 +2732,8 @@ fn button_sized(ui: &mut Ui, p: Palette, label: &str, kind: ButtonKind, width: f
     let hovered = resp.hovered();
     let (fill, stroke, color) = match kind {
         ButtonKind::Plain => (if hovered { p.hover } else { p.card }, p.track, p.text),
-        // Lime with ink text, never white.
-        ButtonKind::Primary => (if hovered { p.accent.lerp_to_gamma(p.ink, 0.12) } else { p.accent }, p.accent, p.ink),
+        // Ink with white text (the mockup's dark button).
+        ButtonKind::Primary => (if hovered { p.strong.gamma_multiply(0.85) } else { p.strong }, p.strong, p.on_strong),
         // Red text on a light red tint.
         ButtonKind::Danger => (p.red.gamma_multiply(if hovered { 0.22 } else { 0.12 }), Color32::TRANSPARENT, p.red),
         ButtonKind::DangerFilled => (if hovered { p.red.gamma_multiply(0.85) } else { p.red }, p.red, Color32::WHITE),
@@ -2916,265 +2770,6 @@ impl SettingsApp {
         } else {
             Some(self.cfg.trigger_device.clone())
         }
-    }
-    fn switching_section(&mut self, ui: &mut Ui, t: &Texts, p: Palette) {
-        ui.add_space(12.0);
-        info_box(ui, p, t.notice_title);
-        info_box(ui, p, t.notice);
-        info_box(ui, p, t.switching_help);
-        if self.cfg.network.on { self.easy_switch_hint(ui, t, p); }
-        ui.add_space(10.0);
-        card(ui, p, |ui| {
-            let mut enabled = self.cfg.enabled;
-            if switch_row(ui, p, t.enabled, None, &mut enabled) {
-                self.apply(|c| c.enabled = enabled);
-            }
-        });
-
-        let buttons = [
-            (BUTTON_WHEEL_MODE, t.button_wheel_mode_short, t.button_wheel_mode),
-            (BUTTON_GESTURE, t.button_gesture_short, t.button_gesture),
-            (BUTTON_MIDDLE, t.button_middle_short, t.button_middle),
-        ];
-        ui.add_space(12.0);
-        ui.horizontal(|ui| {
-            ui.add_space(4.0);
-            ui.label(RichText::new(t.section_buttons).font(bold(13.0)).color(p.muted));
-        });
-        ui.add_space(4.0);
-        let tab_ids: Vec<u16> = buttons.iter().map(|b| b.0).chain([SHORTCUTS_TAB, EDGES_TAB]).collect();
-        let labels: Vec<String> = buttons
-            .iter()
-            .map(|(cid, short, _)| (*short, self.cfg.button(*cid).on))
-            .chain([(t.hotkeys_short, self.cfg.hotkeys.on), (t.edges_short, self.cfg.edges.any())])
-            .map(|(short, on)| if on { format!("{short} ✓") } else { short.to_string() })
-            .collect();
-        if let Some(i) = segments(ui, p, "button-tabs", &labels, Role::Tab, SEG_NORMAL, &[], None, |i| tab_ids[i] == self.button_tab) {
-            self.button_tab = tab_ids[i];
-            self.stop_recording();
-        }
-        if self.button_tab == SHORTCUTS_TAB {
-            ui.add_space(8.0);
-            card(ui, p, |ui| self.shortcut_rows(ui, t, p));
-            return;
-        }
-        if self.button_tab == EDGES_TAB {
-            ui.add_space(8.0);
-            card(ui, p, |ui| self.edge_rows(ui, t, p));
-            return;
-        }
-        let (cid, _, label) = buttons.into_iter().find(|b| b.0 == self.button_tab).unwrap_or(buttons[0]);
-
-        ui.add_space(8.0);
-        card(ui, p, |ui| {
-            // Only known while the master mouse is on this computer. The button is
-            // turned off with the "Off" segment of its channel row.
-            let missing = self.status.trigger.is_some() && !self.status.buttons.contains(&cid);
-            title_row(ui, p, label, missing.then_some(t.not_on_mouse));
-            divider(ui, p);
-            if cid == BUTTON_GESTURE {
-                self.gesture_rows(ui, t, p, cid);
-            } else {
-                self.action_rows(ui, t, p, Slot::Press(cid));
-            }
-            if cid == BUTTON_MIDDLE {
-                hint(ui, p, t.buttons_hint);
-            }
-            if cid == BUTTON_WHEEL_MODE && self.cfg.button(cid).on {
-                divider(ui, p);
-                let mut keep = self.cfg.keep_wheel_mode;
-                let (flipped, label) = switch_row_full(ui, p, t.keep_wheel_mode, None, &mut keep);
-                info_icon(ui, p, Pos2::new(label.right() + 16.0, label.center().y), "keep-wheel-help", t.keep_wheel_mode_help);
-                if flipped {
-                    self.apply(|c| c.keep_wheel_mode = keep);
-                }
-            }
-            ui.add_space(10.0);
-        });
-    }
-    fn shortcut_rows(&mut self, ui: &mut Ui, t: &Texts, p: Palette) {
-        let mut on = self.cfg.hotkeys.on;
-        let (flipped, label) = switch_row_full(ui, p, t.hotkeys_title, None, &mut on);
-        info_icon(ui, p, Pos2::new(label.right() + 16.0, label.center().y), "hotkeys-help", t.hotkey_help);
-        if flipped {
-            self.apply(|c| c.hotkeys.on = on);
-            self.stop_recording();
-        }
-        hint(ui, p, t.hotkeys_hint);
-        if !self.cfg.hotkeys.on {
-            ui.add_space(10.0);
-            return;
-        }
-        ui.add_space(6.0);
-        divider(ui, p);
-        for n in 1..=3u8 {
-            self.shortcut_row(ui, t, p, n, &format!("{} {n}", t.channel), None);
-        }
-        ui.add_space(10.0);
-    }
-    fn edge_rows(&mut self, ui: &mut Ui, t: &Texts, p: Palette) {
-        let mut on = self.cfg.edges.on;
-        if switch_row(ui, p, t.edges_title, None, &mut on) {
-            if on && self.cfg.network.on { self.edge_confirm = true; }
-            else { self.apply(|c| c.edges.on = on); }
-        }
-        if self.cfg.network.on { hint(ui, p, t.edges_network_hint); }
-        let editable = !self.cfg.network.on;
-        ui.add_enabled_ui(editable, |ui| {
-        title_row(ui, p, t.edges_title, None);
-        hint(ui, p, t.edges_hint);
-        ui.add_space(6.0);
-        divider(ui, p);
-        two_columns(ui, |left, right| {
-            self.edge_sides(left, t, p);
-            self.edge_wait(right, t, p);
-        });
-        });
-        ui.add_space(8.0);
-    }
-    fn edge_sides(&mut self, ui: &mut Ui, t: &Texts, p: Palette) {
-        let here = self.status.channel.filter(|c| (1..=3).contains(c));
-        let labels: Vec<String> = [t.off.to_string()].into_iter().chain((1..=3).map(|n| n.to_string())).collect();
-        let width = (ui.available_width() * 0.66).min(260.0);
-        let sides = [(Edge::Left, t.edge_left), (Edge::Right, t.edge_right), (Edge::Top, t.edge_top), (Edge::Bottom, t.edge_bottom)];
-        for (edge, label) in sides {
-            let current = self.cfg.edges.channel(edge);
-            let mut clicked = None;
-            labeled_row(ui, p, label, width, ROW_SMALL, |ui| {
-                // Segment 0 is "off"; this computer's own channel is shown but locked.
-                clicked = segments(ui, p, &format!("edge-{edge:?}"), &labels, Role::RadioButton, SEG_SMALL, &here.map(|c| c as usize).into_iter().collect::<Vec<_>>(), Some(0), |i| {
-                    i as u8 == current
-                });
-                false
-            });
-            if let Some(n) = clicked.map(|i| i as u8).filter(|&n| n != current) {
-                self.apply(|c| {
-                    *c.edges.channel_mut(edge) = n;
-                    c.edges.on = c.edges.any();
-                });
-            }
-        }
-        if let Some(c) = here {
-            hint(ui, p, &format!("{} {c}: {}", t.channel, t.here_channel));
-        }
-        ui.add_space(4.0);
-        divider(ui, p);
-        let choices: Vec<(u64, String)> = [(300, "0.3"), (500, "0.5"), (1000, "1"), (2000, "2")]
-            .into_iter()
-            .map(|(ms, text)| (ms, format!("{text}{}", t.seconds_short)))
-            .collect();
-        let choices: Vec<(u64, &str)> = choices.iter().map(|(ms, s)| (*ms, s.as_str())).collect();
-        let mut dwell = self.cfg.edges.dwell_ms;
-        if labeled_row(ui, p, t.edge_dwell, width, ROW_SMALL, |ui| segmented(ui, p, "edge-dwell", &mut dwell, &choices, SEG_SMALL)) {
-            self.apply(|c| c.edges.dwell_ms = dwell);
-        }
-        divider(ui, p);
-        let mut place = self.cfg.edges.place_cursor;
-        if switch_row(ui, p, t.edge_place, None, &mut place) {
-            self.apply(|c| c.edges.place_cursor = place);
-        }
-        hint(ui, p, t.edges_corner_hint);
-    }
-    fn edge_wait(&mut self, ui: &mut Ui, t: &Texts, p: Palette) {
-        // A sub shows the master's effect settings and cannot change them.
-        let sub = self.follows_master();
-        if sub {
-            self.follow_banner(ui, p, t);
-        }
-        ui.add_enabled_ui(!sub, |ui| {
-            let mut control = self.cfg.edges.require_control;
-            if switch_row(ui, p, t.edge_require_control, None, &mut control) {
-                self.apply(|c| c.edges.require_control = control);
-            }
-            hint(ui, p, t.edge_require_control_hint);
-            ui.add_space(6.0);
-            divider(ui, p);
-            self.edge_anim_rows(ui, t, p);
-        });
-    }
-    fn gesture_rows(&mut self, ui: &mut Ui, t: &Texts, p: Palette, cid: u16) {
-        let gestures = [
-            (Gesture::Press, t.gesture_press),
-            (Gesture::Up, "↑"),
-            (Gesture::Down, "↓"),
-            (Gesture::Left, "←"),
-            (Gesture::Right, "→"),
-        ];
-        let moves = self.cfg.button(cid).moves.clone();
-        let labels: Vec<String> = gestures
-            .iter()
-            .map(|(g, l)| if moves.get(*g).is_some_and(|m| m.on) { format!("{l} ✓") } else { l.to_string() })
-            .collect();
-        ui.add_space(10.0);
-        if let Some(i) = segments(ui, p, "gesture-tabs", &labels, Role::Tab, SEG_SMALL, &[], None, |i| gestures[i].0 == self.gesture_tab) {
-            self.gesture_tab = gestures[i].0;
-        }
-        hint(ui, p, t.gesture_hint);
-        let g = self.gesture_tab;
-        let slot = if g == Gesture::Press { Slot::Press(cid) } else { Slot::Move(cid, g) };
-        self.action_rows(ui, t, p, slot);
-    }
-    fn action_rows(&mut self, ui: &mut Ui, t: &Texts, p: Palette, slot: Slot) {
-        let channels = slot_channels(&self.cfg, slot);
-        let is_on = match slot {
-            Slot::Press(cid) => self.cfg.button(cid).on,
-            Slot::Move(cid, g) => self.cfg.button(cid).moves.get(g).is_some_and(|m| m.on),
-        };
-        let here = self.status.channel.filter(|c| (1..=3).contains(c));
-        // Shown as chosen: where a press goes from here (older settings may list several).
-        let target = match here {
-            Some(c) if is_on => pick(&channels, c, 3),
-            None if is_on => channels.first().copied(),
-            _ => None,
-        };
-        let labels: Vec<String> = [t.off.to_string()].into_iter().chain((1..=3).map(|n| n.to_string())).collect();
-        let seg_width = (ui.available_width() * 0.6).min(260.0);
-        let mut clicked = None;
-        ui.add_space(2.0);
-        labeled_row(ui, p, t.channels, seg_width, ROW_SMALL, |ui| {
-            // Segment 0 is "Off"; this computer's own channel is shown but locked.
-            let locked: Vec<usize> = here.map(|c| c as usize).into_iter().collect();
-            clicked = segments(ui, p, &format!("channels-{slot:?}"), &labels, Role::RadioButton, SEG_SMALL, &locked, Some(0), |i| {
-                if i == 0 { !is_on } else { target == Some(i as u8) }
-            });
-            false
-        });
-        if let Some(c) = here {
-            hint(ui, p, &format!("{} {c}: {}", t.channel, t.here_channel));
-        }
-        let Some(i) = clicked else { return };
-        if i == 0 {
-            if !is_on {
-                return;
-            }
-            match slot {
-                Slot::Press(cid) if self.cfg.triggers() == [cid] => self.error = Some(t.need_one_button.into()),
-                Slot::Press(cid) => self.apply(|c| c.button_mut(cid).on = false),
-                Slot::Move(cid, g) => self.apply(|c| {
-                    if let Some(m) = c.button_mut(cid).moves.get_mut(g) {
-                        m.on = false;
-                    }
-                }),
-            }
-            return;
-        }
-        let n = i as u8;
-        if is_on && channels == [n] {
-            return;
-        }
-        self.apply(|c| {
-            match slot {
-                Slot::Press(cid) => c.button_mut(cid).on = true,
-                Slot::Move(cid, g) => {
-                    if let Some(m) = c.button_mut(cid).moves.get_mut(g) {
-                        m.on = true;
-                    }
-                }
-            }
-            if let Some(channels) = slot_channels_mut(c, slot) {
-                *channels = vec![n];
-            }
-        });
     }
     fn master_section(&mut self, ui: &mut Ui, t: &Texts, p: Palette) {
         section(ui, p, t.master, |ui| {
@@ -3242,20 +2837,12 @@ impl SettingsApp {
         let strength = if h.intensity == 0 { t.haptics_follow.to_string() } else { format!("{}%", h.intensity) };
         let line = format!("{state} · {} {strength}", t.haptics_intensity);
         let mut open = false;
-        let sub = self.follows_master();
         section(ui, p, t.section_haptics, |ui| {
-            if sub {
-                self.follow_banner(ui, p, t);
-            }
-            let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_SMALL), Sense::hover());
-            ui.painter().text(Pos2::new(rect.left(), rect.center().y), Align2::LEFT_CENTER, &line, FontId::proportional(14.0), p.text);
-            let width = button_width(ui, t.haptics_open, ButtonKind::Plain);
-            let area = Rect::from_min_max(
-                Pos2::new(rect.right() - width, rect.center().y - 15.0),
-                Pos2::new(rect.right(), rect.center().y + 15.0),
-            );
-            ui.new_child(UiBuilder::new().max_rect(area)).scope(|ui| {
-                ui.add_enabled_ui(!sub, |ui| open = button(ui, p, t.haptics_open, ButtonKind::Plain).clicked());
+            labeled_row_help(ui, p, &line, Some(t.haptics_summary_help), 130.0, |ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    open = button(ui, p, t.haptics_open, ButtonKind::Plain).clicked();
+                });
+                false
             });
         });
         if open {
@@ -3397,9 +2984,6 @@ fn haptics_viewport() -> egui::ViewportId {
 }
 
 
-const SHORTCUTS_TAB: u16 = 0xFFFF;
-const EDGES_TAB: u16 = 0xFFFE;
-
 fn device_subtitle(d: &DeviceInfo, t: &Texts) -> String {
     let kind = match d.kind.as_str() {
         "mouse" => t.kind_mouse,
@@ -3407,21 +2991,6 @@ fn device_subtitle(d: &DeviceInfo, t: &Texts) -> String {
         _ => t.kind_other,
     };
     format!("{kind} · {}", d.key)
-}
-fn title_row(ui: &mut Ui, p: Palette, label: &str, note: Option<&str>) {
-    let h = if note.is_some() { 50.0 } else { 40.0 };
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), h), Sense::hover());
-    let painter = ui.painter();
-    let left = Pos2::new(rect.left(), rect.center().y);
-    match note {
-        Some(note) => {
-            painter.text(left - Vec2::new(0.0, 1.0), Align2::LEFT_BOTTOM, label, FontId::proportional(14.5), p.text);
-            painter.text(left + Vec2::new(0.0, 3.0), Align2::LEFT_TOP, note, FontId::proportional(12.5), p.amber);
-        }
-        None => {
-            painter.text(left, Align2::LEFT_CENTER, label, FontId::proportional(14.5), p.text);
-        }
-    }
 }
 fn dialog_row(ui: &mut Ui, p: Palette, label: &str, width: f32, control: impl FnOnce(&mut Ui)) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), DIALOG_ROW), Sense::hover());
@@ -3450,16 +3019,16 @@ fn device_choice_row(ui: &mut Ui, p: Palette, mark: Mark, selected: bool, row: &
     let c = Pos2::new(rect.left() + 10.0, rect.center().y);
     match (mark, selected) {
         (Mark::Radio, true) => {
-            painter.circle_filled(c, 10.0, p.accent);
-            painter.circle_filled(c, 4.0, Color32::WHITE);
+            painter.circle_filled(c, 10.0, p.strong);
+            painter.circle_filled(c, 4.0, p.on_strong);
         }
         (Mark::Radio, false) => {
             painter.circle_stroke(c, 9.25, Stroke::new(1.5, p.track));
         }
         (Mark::Check, true) => {
             let r = Rect::from_center_size(c, Vec2::splat(20.0));
-            painter.rect_filled(r, 6, p.accent);
-            let tick = Stroke::new(2.2, Color32::WHITE);
+            painter.rect_filled(r, 6, p.strong);
+            let tick = Stroke::new(2.2, p.on_strong);
             painter.line_segment([c + Vec2::new(-5.0, 0.5), c + Vec2::new(-1.5, 4.0)], tick);
             painter.line_segment([c + Vec2::new(-1.5, 4.0), c + Vec2::new(5.5, -3.5)], tick);
         }
@@ -3526,10 +3095,7 @@ fn toggle(ui: &mut Ui, p: Palette, label: &str, on: &mut bool) -> bool {
         *on = !*on;
     }
     let how_on = ui.ctx().animate_bool_responsive(resp.id, *on);
-    let painter = ui.painter();
-    painter.rect_filled(rect, 12, p.track.lerp_to_gamma(p.accent, how_on));
-    let x = egui::lerp(rect.left() + 12.0..=rect.right() - 12.0, how_on);
-    painter.circle_filled(Pos2::new(x, rect.center().y), 9.5, Color32::WHITE);
+    paint_switch(ui.painter(), p, rect, how_on);
     resp.clicked()
 }
 const SITUATION_CONTROLS: f32 = 360.0;
@@ -3549,10 +3115,389 @@ impl SettingsApp {
             });
         });
     }
-    fn easy_switch_hint(&mut self, ui: &mut Ui, t: &Texts, p: Palette) {
-        ui.label(RichText::new(t.easy_switch_hint).size(12.5).color(p.amber));
-        if self.cfg.enabled && button(ui, p, t.easy_switch_off, ButtonKind::Plain).clicked() {
-            self.apply(|c| c.enabled = false);
+}
+
+impl Page {
+    /// The pages that show what the network is doing, and so refresh twice a second.
+    fn is_network(self) -> bool {
+        matches!(self, Page::Connect | Page::Cross | Page::Keys | Page::Clip | Page::This)
+    }
+}
+
+/// Where the mouse is, for the status card.
+#[derive(Debug, Clone, PartialEq)]
+enum MouseAt {
+    Here,
+    /// On another computer of this name (this one controls it).
+    There(String),
+    /// Another computer (of this name) is using this one.
+    Controlled(String),
+}
+
+impl SettingsApp {
+    /// Re-reads the service's status twice a second.
+    fn poll_network(&mut self) {
+        if self.net_read.elapsed() >= Duration::from_millis(500) {
+            self.net_status = flock_net::read_status(crate::net::config_dir()).ok();
+            self.net_read = Instant::now();
         }
+    }
+
+    fn mouse_at(&self) -> MouseAt {
+        match NetState::of(&self.cfg, self.net_status.as_ref()) {
+            NetState::Controlling(name) => MouseAt::There(name),
+            NetState::Controlled(name) => MouseAt::Controlled(name),
+            _ => MouseAt::Here,
+        }
+    }
+
+    /// This computer's network id: from the running service, else from the identity file
+    /// when one exists (read once). None before sharing has ever been switched on: the
+    /// settings window does not make an identity of its own.
+    fn my_id(&mut self) -> Option<String> {
+        if let Some(s) = self.net_status.as_ref().filter(|s| s.running && !s.me.id.is_empty()) {
+            self.my_id = Some(s.me.id.clone());
+        }
+        if self.my_id.is_none() {
+            let file = crate::net::config_dir().join("flockswitch/net/identity.der");
+            if file.exists() {
+                self.my_id = flock_net::identity::Identity::load_or_create(&crate::net::config_dir()).ok().map(|i| i.id);
+            }
+        }
+        self.my_id.clone()
+    }
+
+    /// The left column: the app, the pages, and the status card.
+    fn sidebar(&mut self, ui: &mut Ui, t: &Texts, p: Palette) {
+        let width = ui.available_width();
+        // The app icon, its name and version.
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 46.0), Sense::hover());
+        let icon = Rect::from_min_size(rect.min + Vec2::new(8.0, 2.0), Vec2::splat(34.0));
+        egui::Image::new((self.icon.id(), icon.size())).corner_radius(9).paint_at(ui, icon);
+        let painter = ui.painter();
+        painter.text(Pos2::new(icon.right() + 10.0, rect.top() + 6.0), Align2::LEFT_TOP, crate::APP_NAME, bold(15.0), p.text);
+        painter.text(Pos2::new(icon.right() + 10.0, rect.top() + 26.0), Align2::LEFT_TOP, env!("CARGO_PKG_VERSION"), mono(11.0), p.muted);
+
+        let mut go = None;
+        for (i, (title, pages)) in Page::groups(t).into_iter().enumerate() {
+            ui.add_space(if i == 0 { 8.0 } else { 20.0 });
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 20.0), Sense::hover());
+            ui.painter().text(rect.left_center() + Vec2::new(12.0, 0.0), Align2::LEFT_CENTER, title, bold(12.0), p.muted);
+            ui.add_space(4.0);
+            for (page, label) in pages {
+                let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 34.0), Sense::click());
+                let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+                let on = page == self.page;
+                resp.widget_info(|| WidgetInfo::selected(Role::Tab, true, on, label));
+                let painter = ui.painter();
+                if on {
+                    painter.rect_filled(rect, 8, p.card);
+                    painter.rect_stroke(rect, 8, Stroke::new(1.0, p.border), StrokeKind::Inside);
+                    painter.circle_filled(Pos2::new(rect.left() + 15.0, rect.center().y), 3.0, p.text);
+                } else if resp.hovered() {
+                    painter.rect_filled(rect, 8, p.text.gamma_multiply(0.05));
+                }
+                let color = if on { p.text } else { p.text.gamma_multiply(0.78) };
+                let font = if on { bold(14.0) } else { FontId::proportional(14.0) };
+                painter.text(Pos2::new(rect.left() + 28.0, rect.center().y), Align2::LEFT_CENTER, label, font, color);
+                if resp.clicked() {
+                    go = Some(page);
+                }
+            }
+        }
+        if let Some(page) = go {
+            if page != self.page {
+                self.stop_recording();
+                self.layout_pick = None;
+                self.page = page;
+            }
+        }
+        ui.add_space(24.0);
+        self.status_card(ui, t, p);
+    }
+
+    /// Where the mouse is, what the network is doing, and the device.
+    fn status_card(&mut self, ui: &mut Ui, t: &Texts, p: Palette) {
+        let at = self.mouse_at();
+        let net = &self.cfg.network;
+        let status = self.net_status.as_ref().filter(|s| s.running);
+        let state = NetState::of(&self.cfg, self.net_status.as_ref());
+        let net_line = if state == NetState::Off {
+            t.status_net_off.to_string()
+        } else if net.role == flock_net::Role::Master {
+            let up = status.map_or(0, |s| s.peers.iter().filter(|x| x.connected && !x.via_master).count());
+            crate::i18n::fill(t.status_master, &[&up.to_string(), &flock_net::MAX_SUBS.to_string()])
+        } else {
+            match net.peers.first() {
+                Some(master) => crate::i18n::fill(t.status_sub, &[&master.name]),
+                None => t.status_sub_none.to_string(),
+            }
+        };
+        let (line, here) = match &at {
+            MouseAt::Here => (t.status_here.to_string(), true),
+            MouseAt::There(name) => (crate::i18n::fill(t.status_there, &[name]), false),
+            MouseAt::Controlled(name) => (crate::i18n::fill(t.status_controlled, &[name]), true),
+        };
+        let device = match &self.status.trigger {
+            Some(name) => match self.status.channel {
+                Some(c) => format!("{name} · {}", crate::i18n::fill(t.status_channel, &[&c.to_string()])),
+                None => name.clone(),
+            },
+            None => t.searching.to_string(),
+        };
+        egui::Frame::new()
+            .fill(p.card)
+            .stroke(Stroke::new(1.0, p.border))
+            .corner_radius(10)
+            .inner_margin(Margin::same(12))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.spacing_mut().item_spacing.y = 4.0;
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    // The one lime mark: the mouse is on this computer.
+                    let (dot, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+                    if here {
+                        ui.painter().circle_filled(dot.center(), 6.0, p.accent.gamma_multiply(0.35));
+                        ui.painter().circle_filled(dot.center(), 4.0, p.accent);
+                    } else {
+                        ui.painter().circle_filled(dot.center(), 4.0, p.off);
+                    }
+                    ui.add(egui::Label::new(RichText::new(line).size(13.0).color(p.text)).wrap());
+                });
+                ui.label(RichText::new(net_line).size(12.0).color(p.muted));
+                ui.label(RichText::new(device).font(mono(11.0)).color(p.muted));
+            });
+    }
+
+    fn page_body(&mut self, ui: &mut Ui, t: &Texts, p: Palette) {
+        match self.page {
+            Page::Connect => self.connect_page(ui, t, p),
+            Page::Cross => self.cross_page(ui, t, p),
+            Page::Keys => self.keys_page(ui, t, p),
+            Page::Clip => self.clip_page(ui, t, p),
+            Page::This => self.this_page(ui, t, p),
+            Page::Buttons => self.buttons_page(ui, t, p),
+            Page::Hotkeys => self.hotkeys_page(ui, t, p),
+            Page::Edges => self.edges_page(ui, t, p),
+            Page::Devices => self.devices_page(ui, t, p),
+            Page::Effects => self.effects_page(ui, t, p),
+            Page::General => self.general_page(ui, t, p),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_window_has_one_fixed_size() {
+        let builder = window_builder("x", egui::IconData { rgba: vec![0; 4], width: 1, height: 1 });
+        let size = Vec2::from(WINDOW_SIZE);
+        assert_eq!(builder.inner_size, Some(size));
+        // The smallest and the largest are the size itself, and it cannot be dragged.
+        assert_eq!(builder.min_inner_size, Some(size));
+        assert_eq!(builder.max_inner_size, Some(size));
+        assert_eq!(builder.resizable, Some(false));
+        assert_eq!(builder.maximize_button, Some(false));
+    }
+
+    #[test]
+    fn the_fixed_size_fits_a_small_laptop_screen_and_the_widest_page() {
+        // A 13-inch MacBook offers 1440x900 points less the menu bar and the Dock.
+        assert!(WINDOW_SIZE[0] <= 1280.0 && WINDOW_SIZE[1] <= 800.0, "{WINDOW_SIZE:?}");
+        // The page beside the sidebar is wide enough for the 5-cell layout map: each
+        // cell at least 100 points (padding, scroll gutter, card margins, map padding).
+        let page = WINDOW_SIZE[0] - SIDEBAR_WIDTH - 2.0 * PAGE_PADDING.x - 10.0 - 2.0 * 18.0 - 2.0 * 14.0;
+        assert!((page - 4.0 * 10.0) / 5.0 >= 100.0, "{page}");
+        // The sidebar holds its three groups and eleven pages without scrolling.
+        let sidebar = 46.0 + (8.0 + 24.0) + 2.0 * (20.0 + 24.0) + 11.0 * 34.0 + 24.0 + 90.0;
+        assert!(sidebar + 32.0 <= WINDOW_SIZE[1], "{sidebar}");
+    }
+
+    #[test]
+    fn every_section_header_has_one_height() {
+        // Boxes side by side start on one line because every header is this tall.
+        assert!(SECTION_HEAD >= 28.0 && SECTION_HEAD <= 40.0);
+        assert!(CONTROL_HEIGHT + 2.0 <= SECTION_HEAD, "a button in a header must fit");
+    }
+
+    #[test]
+    fn every_page_is_in_the_sidebar_once() {
+        for t in [&crate::i18n::texts()] {
+            let pages: Vec<Page> = Page::groups(t).into_iter().flat_map(|(_, p)| p.into_iter().map(|(page, _)| page)).collect();
+            assert_eq!(pages.len(), 11);
+            for page in [
+                Page::Connect,
+                Page::Cross,
+                Page::Keys,
+                Page::Clip,
+                Page::This,
+                Page::Buttons,
+                Page::Hotkeys,
+                Page::Edges,
+                Page::Devices,
+                Page::Effects,
+                Page::General,
+            ] {
+                assert_eq!(pages.iter().filter(|p| **p == page).count(), 1, "{page:?}");
+            }
+            for (title, pages) in Page::groups(t) {
+                assert!(!title.is_empty() && pages.iter().all(|(_, label)| !label.is_empty()));
+            }
+        }
+        // The groups, in the mockup's order.
+        crate::i18n::set_language("ko");
+        let t = crate::i18n::texts();
+        let groups = Page::groups(t);
+        assert_eq!(groups.iter().map(|g| g.0).collect::<Vec<_>>(), ["네트워크", "로지텍", "앱"]);
+        assert_eq!(
+            groups[0].1.iter().map(|p| p.1).collect::<Vec<_>>(),
+            ["연결과 배치", "넘기기", "키보드", "클립보드", "이 컴퓨터"]
+        );
+        assert_eq!(groups[1].1.iter().map(|p| p.1).collect::<Vec<_>>(), ["버튼 전환", "단축키 전환", "모서리 전환", "장치"]);
+        assert_eq!(groups[2].1.iter().map(|p| p.1).collect::<Vec<_>>(), ["효과", "일반"]);
+    }
+
+    #[test]
+    fn the_palette_keeps_lime_for_the_dot_and_the_role() {
+        for dark in [false, true] {
+            let p = Palette::new(dark);
+            // Marks that are "on" are not lime: switches, primary buttons, raised segments.
+            assert_ne!(p.strong, LIME);
+            assert_ne!(p.seg_on, LIME);
+            assert_ne!(p.on_strong, LIME);
+            assert_eq!(p.accent, LIME);
+        }
+    }
+
+    /// The widest right edge and the lowest bottom edge of any text drawn.
+    fn text_extent(shape: &Shape, within: &mut (f32, f32, String)) {
+        match shape {
+            Shape::Text(t) => {
+                let r = t.galley.rect.translate(t.pos.to_vec2());
+                if r.right() > within.0 {
+                    within.0 = r.right();
+                    within.2 = t.galley.text().chars().take(30).collect();
+                }
+                within.1 = within.1.max(r.bottom());
+            }
+            Shape::Vec(v) => v.iter().for_each(|s| text_extent(s, within)),
+            _ => {}
+        }
+    }
+
+    fn text_rects(shape: &Shape, out: &mut Vec<(Rect, String)>) {
+        match shape {
+            Shape::Text(t) => out.push((t.galley.rect.translate(t.pos.to_vec2()), t.galley.text().chars().take(24).collect())),
+            Shape::Vec(v) => v.iter().for_each(|s| text_rects(s, out)),
+            _ => {}
+        }
+    }
+
+    fn shape_text_has(shape: &Shape, needle: &str) -> bool {
+        match shape {
+            Shape::Text(t) => t.galley.text().contains(needle),
+            Shape::Vec(v) => v.iter().any(|s| shape_text_has(s, needle)),
+            _ => false,
+        }
+    }
+
+    /// Runs every page for a few frames without a window, to catch a panic or a layout
+    /// that asks for the impossible. It points HOME at a throwaway folder (so nothing of
+    /// the real settings is touched) and so runs alone:
+    /// `cargo test settings_ui -- --ignored every_page_renders`
+    #[test]
+    #[ignore = "uses its own HOME; run it by name"]
+    fn every_page_renders() {
+        let home = std::env::temp_dir().join(format!("flockswitch-ui-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var("HOME", &home);
+        let mut cfg = Config::default();
+        cfg.check_updates = false;
+        cfg.network.on = true;
+        cfg.network.notice_accepted = true;
+        for (id, name, side) in [("peer-a", "Laptop", Some(flock_net::Side::Left)), ("peer-b", "ThinkPad", Some(flock_net::Side::Top)), ("peer-c", "Studio PC", None)] {
+            cfg.network.peers.push(flock_net::PeerConfig { id: id.into(), name: name.into(), os: flock_net::Os::Windows, side, ..Default::default() });
+        }
+        cfg.save().unwrap();
+        let status: flock_net::Status = serde_json::from_value(serde_json::json!({
+            "running": true,
+            "me": {"id": "me-id", "name": "Mac mini", "port": 47160, "error": null},
+            "discovered": [{"id": "near", "name": "Office iMac", "os": "mac", "addr": "192.168.0.31:47160", "paired": false}],
+            "peers": [{"id": "peer-a", "connected": true, "rtt_ms": 3.4}, {"id": "peer-b", "connected": false, "rtt_ms": null}],
+            "state": {"mode": "controlling", "peer": "peer-a"}, "pairing": {"peer_name": "Office iMac", "code": "482917", "stage": "wait"},
+            "transfer": {"direction": "send", "kind": "files", "done_bytes": 18000000, "total_bytes": 43000000, "stage": "running", "saved_in": null},
+            "layout": [{"id": "me-id", "col": 2, "row": 1}, {"id": "peer-a", "col": 1, "row": 1}, {"id": "peer-b", "col": 1, "row": 0}]
+        })).unwrap();
+        flock_net::write_status(crate::net::config_dir(), &status).unwrap();
+
+        let ctx = egui::Context::default();
+        install_fonts(&ctx);
+        install_style(&ctx);
+        let mut app = SettingsApp::new(&ctx, Arc::new(AtomicBool::new(false)), false);
+        let pages = [Page::Connect, Page::Cross, Page::Keys, Page::Clip, Page::This, Page::Buttons, Page::Hotkeys, Page::Edges, Page::Devices, Page::Effects, Page::General];
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::from(WINDOW_SIZE));
+        let mut overlaps: Vec<String> = Vec::new();
+        for role_sub in [false, true] {
+            if role_sub {
+                app.apply(|c| c.network.role = flock_net::Role::Sub);
+                app.apply(|c| c.network.peers.truncate(1));
+            }
+            for lang in ["ko", "en"] {
+                crate::i18n::set_language(lang);
+                for page in pages {
+                    app.page = page;
+                    app.layout_pick = Some("peer-a".into());
+                    for pair in 0..3 {
+                        app.key_pair = pair;
+                        for dir in 0..2 {
+                            app.key_dir = dir;
+                            for frame in 0..3 {
+                                let input = egui::RawInput { screen_rect: Some(screen), time: Some(frame as f64 * 0.1), ..Default::default() };
+                                let mut out = ctx.run_ui(input, |ui| app.show(ui));
+                                out.textures_delta.clear();
+                                assert!(!out.shapes.is_empty(), "{page:?} drew nothing");
+                                // egui paints a warning over widgets that share an id.
+                                let clash = out.shapes.iter().any(|s| shape_text_has(&s.shape, "clash"));
+                                assert!(!clash, "{page:?} (sub: {role_sub}): widget id clash");
+                                let mut extent = (0.0, 0.0, String::new());
+                                out.shapes.iter().for_each(|s| text_extent(&s.shape, &mut extent));
+                                // No two texts sit on top of each other.
+                                if frame == 2 {
+                                    let mut rects = Vec::new();
+                                    out.shapes.iter().for_each(|s| text_rects(&s.shape, &mut rects));
+                                    assert!(rects.len() > 8, "{page:?}: only {} texts drawn", rects.len());
+                                    for (i, (a, ta)) in rects.iter().enumerate() {
+                                        for (b, tb) in &rects[i + 1..] {
+                                            let overlap = a.intersect(*b);
+                                            let small = a.area().min(b.area());
+                                            if overlap.is_positive() && small > 0.0 && overlap.area() > 0.25 * small {
+                                                overlaps.push(format!("{page:?}/{lang}/sub={role_sub}: {ta:?} over {tb:?}"));
+                                            }
+                                        }
+                                    }
+                                }
+                                // Nothing runs past the window's right edge.
+                                assert!(extent.0 <= WINDOW_SIZE[0] - 6.0, "{page:?} {lang} (sub: {role_sub}): text reaches {} at {:?}", extent.0, extent.2);
+                            }
+                            if page != Page::Keys {
+                                break;
+                            }
+                        }
+                        if page != Page::Keys {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        app.keys_cmp = true;
+        let _ = std::fs::remove_dir_all(&home);
+        overlaps.sort();
+        overlaps.dedup();
+        assert!(overlaps.is_empty(), "{}", overlaps.join("\n"));
     }
 }

@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.1.0 - 2026-11-27
+
+- New settings window: one fixed-size window with a sidebar (Network: Connection and layout, Crossing, Keyboard, Clipboard, This computer; Logitech: Button switching, Shortcut switching, Edge switching, Devices; App: Effects, General) instead of tabs. Pages scroll inside the window, which never changes size; section headers share one height and boxes side by side line up; lime is used only for the "mouse is here" dot and the chosen role. A status card at the foot of the sidebar shows where the mouse is, the network state and the device.
+- Layout map (Connection and layout): place the master and the subs on a 5 x 3 grid (click a computer, then an empty cell; master only, subs see it locked). Subs placed side by side now cross directly to each other.
+- A switch per paired computer, "Use other computers with this computer's mouse and keyboard" (master only).
+- **Find connections again** and automatic reconnecting after the Mac wakes from sleep or the screen is unlocked.
+- Clipboard page: sharing between subs (through the master), what is sent, the received folder with its last file, and the transfer status.
+- Keyboard page, **When switching OS**: key rules for each pair of systems and direction - how modifier keys are matched (by function, by position, or unchanged) with an editable mapping table, the Korean/English keys of the sender (several) and the key the receiver understands, Caps Lock held long, the Hanja key, navigation keys and screen capture. A sub's edit goes to the master. **Compare keys by system** window. The old Cmd/Ctrl, Caps Lock, Shift+Space and Hangul-key switches are now these rules; existing settings carry over.
+- **Update now** appears whenever a newer version is known (also one the menu-bar app found), and installs at once: download, SHA-256 check, install, restart.
+- Fix: shaking the mouse showed only macOS's own cursor enlargement, not flockswitch's highlight. The shake detector counted the time from the end of the first long stroke, needed strokes of 80 points, watched only the horizontal axis and read the cursor every 25 ms; a quick shake by hand (strokes of 30 to 100 points, stopped as soon as the cursor reacts) never lasted long enough. It now counts from where the movement began, takes strokes of 30 points, watches both axes and reads every 10 ms while shake detection is on.
+- The Logitech edge switching and network edge crossing use the layout, so a sub can cross to a neighbouring sub when waiting at an edge too.
+
 ## 2.0.2 - 2026-11-27
 
 - A settings import from a 2.0 test build that fails no longer resets all settings to the defaults; it is logged and tried again at the next start.
