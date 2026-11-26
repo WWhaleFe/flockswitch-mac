@@ -392,7 +392,23 @@ fn wait_readable(listener: &TcpListener, timeout: Duration) -> bool {
     // On an error (not a timeout) fall through to accept, which reports it.
     ready != 0
 }
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn wait_readable(listener: &TcpListener, timeout: Duration) -> bool {
+    use std::os::windows::io::AsRawSocket;
+    #[repr(C)]
+    struct WsaPollFd { socket: usize, events: i16, revents: i16 }
+    #[link(name = "ws2_32")]
+    extern "system" {
+        fn WSAPoll(fds: *mut WsaPollFd, n: u32, timeout: i32) -> i32;
+    }
+    const POLLRDNORM: i16 = 0x0100;
+    let mut fd = WsaPollFd { socket: listener.as_raw_socket() as usize, events: POLLRDNORM, revents: 0 };
+    // SAFETY: one valid WSAPOLLFD that lives through the call; the listener keeps Winsock started.
+    let ready = unsafe { WSAPoll(&mut fd, 1, timeout.as_millis() as i32) };
+    // On an error (not a timeout) fall through to accept, which reports it.
+    ready != 0
+}
+#[cfg(not(any(unix, windows)))]
 fn wait_readable(_: &TcpListener, timeout: Duration) -> bool {
     thread::sleep(timeout.min(Duration::from_millis(50)));
     true
