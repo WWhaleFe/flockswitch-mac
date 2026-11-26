@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.0.2 - 2026-11-27
+
+- A settings import from a 2.0 test build that fails no longer resets all settings to the defaults; it is logged and tried again at the next start.
+- Agreeing to the network cautions while sharing is already on now hands the screen edges to network crossing (the Logitech edge switching turns off), as switching sharing on does.
+
 ## 2.0.1 - 2026-11-26
 
 - The settings window shows the missing-permission notice on the Network tab in the chosen language (it was always English).
