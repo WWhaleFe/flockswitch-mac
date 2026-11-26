@@ -109,8 +109,15 @@ impl SettingsApp {
         });
 
         // What macOS still has to allow.
-        let background = crate::main_instance_running();
-        let grants = if background { crate::net::reported_permissions() } else { None };
+        // Screenshot mode shows everything healthy.
+        let background = super::shots::active() || crate::main_instance_running();
+        let grants = if super::shots::active() {
+            Some(flock_net::Permissions { accessibility: true, input_monitoring: true })
+        } else if background {
+            crate::net::reported_permissions()
+        } else {
+            None
+        };
         if net.on && !grants.is_some_and(|g| g.accessibility && g.input_monitoring) {
             gap(ui);
             card(ui, p, |ui| {
