@@ -1789,6 +1789,7 @@ impl SettingsApp {
                     self.apply(|c| *c = backup::restore(c, cfg));
                     match self.error.take() {
                         None => {
+                            crate::key_rules::clear(&Config::path());
                             log::info!("settings loaded from {}", file.path.display());
                             self.backup_note = Some((format!("{}: {}", t.backup_loaded, file.name), true));
                             return;

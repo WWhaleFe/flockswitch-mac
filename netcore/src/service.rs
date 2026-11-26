@@ -2042,9 +2042,6 @@ impl Control {
     fn clip_start(&mut self, peer: &str, id: u32, kind: crate::transfer::ClipKind, files: Vec<crate::transfer::FileMeta>) {
         use crate::transfer::{ClipKind, Incoming};
         self.file_jobs.cancel_direction(1);
-        if self.config.share_clipboard {
-            self.drop_stale_sends();
-        }
         self.transfer_revision = self.transfer_revision.wrapping_add(1);
         if let Some((_, old)) = self.incoming.take() {
             old.abandon();
@@ -2060,6 +2057,9 @@ impl Control {
         // Android has no place for files: refuse them without downloading.
         if kind == ClipKind::Files && self.platform.os() == Os::Android {
             return;
+        }
+        if self.config.share_clipboard {
+            self.drop_stale_sends();
         }
         let limit = u64::from(crate::transfer::LIMIT_MB) * 1024 * 1024;
         let work = self.config.config_dir.join("flockswitch");
