@@ -5,7 +5,8 @@ use crate::device::Reporting;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
+use std::time::Duration;
 
 /// A device seen at least once, remembered on disk so settings can list it even while
 /// it is connected to another computer.
@@ -278,7 +279,9 @@ pub struct Shared {
     version: AtomicU64,
     status: Mutex<Status>,
     last_status_file: Mutex<StatusFile>,
-    pub stop: AtomicBool,
+    stop: AtomicBool,
+    wake_revision: Mutex<u64>,
+    wake: Condvar,
     /// Channel asked for by a keyboard shortcut, for the engine to act on (0 = none).
     switch_request: AtomicU8,
     /// Haptic waveform the edge watcher asks the engine to play on the mouse (+1; 0 = none).
@@ -297,6 +300,8 @@ impl Shared {
             status: Mutex::new(Status::default()),
             last_status_file: Mutex::new(StatusFile { online: vec!["-".into()], ..StatusFile::default() }),
             stop: AtomicBool::new(false),
+            wake_revision: Mutex::new(0),
+            wake: Condvar::new(),
             switch_request: AtomicU8::new(0),
             haptic_request: AtomicU8::new(0),
             locate_request: AtomicBool::new(false),
@@ -325,6 +330,7 @@ impl Shared {
         // Force one fresh read: another process may have saved just after our transaction.
         *self.config_mtime.lock().unwrap() = None;
         self.version.fetch_add(1, Ordering::SeqCst);
+        self.notify_change();
         Ok(())
     }
 
@@ -346,6 +352,7 @@ impl Shared {
                 crate::i18n::set_language(&cfg.language);
                 *current = cfg;
                 self.version.fetch_add(1, Ordering::SeqCst);
+                self.notify_change();
                 log::info!("settings file changed, reloaded");
             }
             Err(e) => log::warn!("settings file has an error, keeping current settings: {e:#}"),
@@ -379,6 +386,7 @@ impl Shared {
         if *last != file {
             save_status_file(&file);
             *last = file;
+            self.notify_change();
         }
     }
 
@@ -403,10 +411,32 @@ impl Shared {
     /// The locate shortcut was pressed: the screen watcher shows the cursor.
     pub fn request_locate(&self) {
         self.locate_request.store(true, Ordering::SeqCst);
+        self.notify_change();
     }
 
     pub fn take_locate_request(&self) -> bool {
         self.locate_request.swap(false, Ordering::SeqCst)
+    }
+
+    pub fn wake_revision(&self) -> u64 {
+        *self.wake_revision.lock().unwrap()
+    }
+
+    fn notify_change(&self) {
+        let mut revision = self.wake_revision.lock().unwrap();
+        *revision = revision.wrapping_add(1);
+        self.wake.notify_all();
+    }
+
+    /// The revision predicate retains notifications sent before the wait begins.
+    pub fn wait_for_change(&self, revision: u64, timeout: Duration) {
+        let seen = self.wake_revision.lock().unwrap();
+        let _ = self.wake.wait_timeout_while(seen, timeout, |seen| *seen == revision && !self.stopped()).unwrap();
+    }
+
+    pub fn request_stop(&self) {
+        self.stop.store(true, Ordering::SeqCst);
+        self.notify_change();
     }
 
     pub fn stopped(&self) -> bool {
@@ -417,6 +447,37 @@ impl Shared {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notifications_before_wait_and_stop_are_not_lost() {
+        let shared = Shared::new(Config::default());
+        let revision = shared.wake_revision();
+        shared.request_locate();
+        assert_ne!(revision, shared.wake_revision());
+        // A long timeout makes a missing predicate fail the test immediately on timeout.
+        let start = std::time::Instant::now();
+        shared.wait_for_change(revision, Duration::from_secs(1));
+        assert!(start.elapsed() < Duration::from_millis(500));
+        assert!(shared.take_locate_request());
+        shared.request_stop();
+        shared.wait_for_change(shared.wake_revision(), Duration::from_secs(1));
+        assert!(shared.stopped());
+    }
+
+    #[test]
+    fn a_sleeping_watcher_wakes_for_a_locate_request() {
+        let shared = std::sync::Arc::new(Shared::new(Config::default()));
+        let revision = shared.wake_revision();
+        let watcher = shared.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            watcher.wait_for_change(revision, Duration::from_secs(2));
+            tx.send(watcher.take_locate_request()).unwrap();
+        });
+        shared.request_locate();
+        assert!(rx.recv_timeout(Duration::from_secs(1)).unwrap());
+        handle.join().unwrap();
+    }
 
     #[test]
     fn haptic_preview_requests() {

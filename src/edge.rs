@@ -258,6 +258,7 @@ pub fn available() -> bool {
 pub fn spawn(shared: Arc<Shared>) {
     std::thread::Builder::new()
         .name("edges".into())
+        .stack_size(256 * 1024)
         .spawn(move || watch(shared))
         .expect("spawning the edge watcher");
 }
@@ -267,11 +268,21 @@ fn edge_activity(cfg: &crate::config::Config) -> (bool, bool) {
     (cfg.logitech_edges_allowed(), cfg.network_edges_allowed() && cfg.network.notice_accepted && cfg.network.cross_delay_ms > 0)
 }
 
+/// Keep the normal sampling rate during motion. A stationary shake watcher needs
+/// no finer sampling than edges; disabled features wait for a shared-state event.
+fn watch_interval(active: bool, shake: bool, moving: bool) -> Duration {
+    if shake && moving { SHAKE_POLL }
+    else if active || shake { POLL }
+    else { Duration::from_secs(30) }
+}
+
 fn watch(shared: Arc<Shared>) {
     if !available() {
         log::info!("edge switching: not available on this computer");
         return;
     }
+    let mut revision = shared.wake_revision();
+    let mut first = true;
     let mut cfg = shared.config();
     let mut version = shared.version();
     let mut announced = false;
@@ -293,9 +304,18 @@ fn watch(shared: Arc<Shared>) {
     // The countdown is on the screen.
     let mut counting_down = false;
     let mut shake = Shake::default();
+    let mut last_shake_cursor = None;
+    let mut moving_until = Instant::now();
 
     while !shared.stopped() {
-        std::thread::sleep(if cfg.locate.on && cfg.locate.on_shake { SHAKE_POLL } else { POLL });
+        let (logitech, network) = edge_activity(&cfg);
+        if !first {
+            shared.wait_for_change(revision, watch_interval(logitech || network,
+                cfg.locate.on && cfg.locate.on_shake, Instant::now() < moving_until));
+        }
+        first = false;
+        revision = shared.wake_revision();
+        if shared.stopped() { break; }
         if shared.version() != version {
             version = shared.version();
             cfg = shared.config();
@@ -316,7 +336,9 @@ fn watch(shared: Arc<Shared>) {
                 log::info!("edges: on, but no edge has a channel");
             }
         }
-        if status_read.is_none_or(|t| t.elapsed() >= STATUS_POLL) {
+        if (!active && !(cfg.locate.on && cfg.locate.on_shake))
+            || status_read.is_none_or(|t| t.elapsed() >= STATUS_POLL)
+        {
             let first = status_read.is_none();
             status_read = Some(Instant::now());
             let st = shared.status();
@@ -353,8 +375,11 @@ fn watch(shared: Arc<Shared>) {
         if cfg.locate.on && cfg.locate.on_shake {
             let held = platform::key_down(cfg.locate.shake_key);
             let time = Duration::from_millis(cfg.locate.shake_time_ms);
-            if platform::cursor().is_some_and(|at| shake.update(at, held, time, Instant::now())) {
-                overlay::locate(&cfg.locate);
+            if let Some(at) = platform::cursor() {
+                let now = Instant::now();
+                if last_shake_cursor != Some(at) { moving_until = now + SHAKE_GAP; }
+                last_shake_cursor = Some(at);
+                if shake.update(at, held, time, now) { overlay::locate(&cfg.locate); }
             }
         }
         if !active {
@@ -592,6 +617,17 @@ pub(crate) mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disabled_watchers_park_and_motion_restores_fine_shake_sampling() {
+        for active in [false, true] {
+            assert_eq!(watch_interval(active, true, true), Duration::from_millis(10));
+            assert_eq!(watch_interval(active, true, false), Duration::from_millis(25));
+        }
+        assert_eq!(watch_interval(true, false, true), POLL);
+        assert_eq!(watch_interval(true, false, false), POLL);
+        assert_eq!(watch_interval(false, false, false), Duration::from_secs(30));
+    }
 
     fn two_side_by_side() -> Vec<Rect> {
         // Main display 1920×1080 with a second one to its right, a little higher.

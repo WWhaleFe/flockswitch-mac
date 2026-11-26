@@ -372,6 +372,7 @@ pub fn spawn(shared: Arc<Shared>) -> JoinHandle<()> {
             let mut rules_retry = Instant::now() - Duration::from_secs(1);
             let mut retry = Instant::now() - Duration::from_secs(5);
             while !shared.stopped() {
+                let revision = shared.wake_revision();
                 shared.reload_if_edited();
                 let version = shared.version();
                 let config = runtime_config(&shared);
@@ -509,7 +510,12 @@ pub fn spawn(shared: Arc<Shared>) -> JoinHandle<()> {
                         }
                     }
                 }
+                let running = service.is_some();
                 previous = Some(config);
+                if !running {
+                    shared.wait_for_change(revision, Duration::from_millis(250));
+                    continue;
+                }
                 for _ in 0..5 {
                     if shared.stopped() || shared.version() != version {
                         break;
@@ -523,7 +529,7 @@ pub fn spawn(shared: Arc<Shared>) -> JoinHandle<()> {
                         }
                     }
                     if let Some(s) = &service {
-                        let now = s.status().state.mode;
+                        let now = s.state().mode;
                         // The cursor arrived here, or came back here.
                         let arrived = (mode == "local" && now == "controlled")
                             || (mode == "controlling" && now == "local");
