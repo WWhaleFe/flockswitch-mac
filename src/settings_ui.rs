@@ -1335,6 +1335,7 @@ impl SettingsApp {
                     self.confirm_reset = false;
                     self.stop_recording();
                     self.apply(|c| *c = Config { language: c.language.clone(), ..Config::default() });
+                    crate::key_rules::clear(&Config::path());
                 }
                 (true, Some(_)) => self.confirm_reset = false,
                 _ => {}

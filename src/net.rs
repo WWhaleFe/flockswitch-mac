@@ -242,6 +242,7 @@ pub fn network_side_ready(edge: Edge) -> bool {
     // another sub), as long as its link is up.
     let next = flock_net::layout::neighbour(&status.layout, &status.me.id, side);
     status.running
+        && status.me.can_send
         && status.state.mode == "local"
         && next.is_some_and(|id| status.peers.iter().any(|s| s.id == id && s.connected))
 }
@@ -298,6 +299,16 @@ fn apply_app_settings(config: &mut Config, app: &Value) {
     }
 }
 
+/// The name to show for the computer `id`: the live status (also for a sub known only
+/// through the master), else the configured peer name. None when neither has one.
+pub fn peer_name(net: &NetConfig, status: Option<&flock_net::Status>, id: &str) -> Option<String> {
+    status
+        .and_then(|s| s.peers.iter().find(|p| p.id == id))
+        .map(|p| p.name.clone())
+        .filter(|n| !n.is_empty())
+        .or_else(|| net.peers.iter().find(|p| p.id == id).map(|p| p.name.clone()).filter(|n| !n.is_empty()))
+}
+
 /// What this computer is doing on the network, for the header and the tray menu.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NetState {
@@ -317,7 +328,7 @@ impl NetState {
         };
         let name = || {
             let id = status.state.peer.as_deref().unwrap_or_default();
-            config.network.peers.iter().find(|p| p.id == id).map_or_else(|| id.to_string(), |p| p.name.clone())
+            peer_name(&config.network, Some(status), id).unwrap_or_else(|| id.to_string())
         };
         match status.state.mode.as_str() {
             "controlling" => NetState::Controlling(name()),
@@ -386,10 +397,20 @@ pub fn spawn(shared: Arc<Shared>) -> JoinHandle<()> {
                 // the latest edit, so sharing off, disconnects and restarts retain it.
                 if rules_retry.elapsed() >= Duration::from_secs(1) {
                     rules_retry = Instant::now();
+                    crate::key_rules::drop_stale(&Config::path(), &shared.config());
                     match crate::key_rules::pending(&Config::path(), &shared.config()) {
                         Ok(Some(edit)) => {
                             if let Some(s) = &service {
-                                if let Err(e) = s.send_key_rules(edit.keys) { log::warn!("send key rules: {e:#}"); }
+                                let status = s.status();
+                                let master = shared.config().network.peers.iter().find(|p| p.role == Role::Master).map(|p| p.id.clone());
+                                let old_master = master.as_deref().is_some_and(|id| status.peers.iter().any(|x| x.id == id && x.connected && !x.keyrules));
+                                if old_master {
+                                    // A 2.0 master ignores key rule edits: stop resending.
+                                    crate::key_rules::clear(&Config::path());
+                                } else if status.following.is_some() {
+                                    // netcore holds edits back until the master's settings arrived.
+                                    if let Err(e) = s.send_key_rules(edit.keys) { log::warn!("send key rules: {e:#}"); }
+                                }
                             }
                         }
                         Ok(None) => {}
@@ -446,6 +467,7 @@ pub fn spawn(shared: Arc<Shared>) -> JoinHandle<()> {
                                 {
                                     log::error!("save unpaired computer: {e:#}");
                                 }
+                                crate::key_rules::drop_stale(&Config::path(), &unpaired.config());
                             }),
                             on_peer_changed: Box::new(move |peer| {
                                 if let Err(e) = changed.update_config(|c| {
@@ -1170,6 +1192,26 @@ mod tests {
         assert_eq!(NetState::of(&config, Some(&status("controlled", Some("p1")))), NetState::Controlled("Laptop".into()));
         config.network.on = false;
         assert_eq!(NetState::of(&config, Some(&status("local", None))), NetState::Off);
+    }
+    #[test]
+    fn peer_names_prefer_the_live_status() {
+        let mut config = Config::default();
+        config.network.on = true;
+        config.network.notice_accepted = true;
+        config.network.peers.push(flock_net::PeerConfig { id: "p1".into(), name: "Laptop".into(), ..Default::default() });
+        let peer = |id: &str, name: &str| flock_net::PeerStatus { id: id.into(), name: name.into(), os: None, connected: true, rtt_ms: None, can_send: true, via_master: true, keyrules: true };
+        let status = flock_net::Status {
+            running: true,
+            me: flock_net::MeStatus { id: String::new(), name: String::new(), port: 0, error: None, can_send: true },
+            discovered: vec![],
+            peers: vec![peer("p1", "Renamed"), peer("p2", "Desk"), peer("p3", "")],
+            state: flock_net::StateStatus { mode: "controlling".into(), peer: Some("p2".into()) },
+            pairing: None, transfer: None, following: None, layout: vec![], reconnecting: false, keys: Default::default(),
+        };
+        assert_eq!(NetState::of(&config, Some(&status)), NetState::Controlling("Desk".into()));
+        assert_eq!(peer_name(&config.network, Some(&status), "p1").as_deref(), Some("Renamed"));
+        assert_eq!(peer_name(&config.network, Some(&status), "p3"), None);
+        assert_eq!(peer_name(&config.network, None, "p1").as_deref(), Some("Laptop"));
     }
 }
 

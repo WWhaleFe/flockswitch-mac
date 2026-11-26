@@ -42,6 +42,23 @@ pub fn pending(config: &Path, cfg: &Config) -> Result<Option<Pending>> {
     Ok((Some(edit.master.as_str()) == master(cfg)).then_some(edit))
 }
 
+/// Drops the outbox: unpair, role change, reset, or a master that cannot take edits.
+pub fn clear(config: &Path) {
+    match std::fs::remove_file(path(config)) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => log::warn!("clear pending key rules: {e}"),
+    }
+}
+
+/// Removes an outbox that no longer belongs to the config (not a sub any more, or another
+/// master). Unreadable files go too.
+pub fn drop_stale(config: &Path, cfg: &Config) {
+    if path(config).exists() && !matches!(pending(config, cfg), Ok(Some(_))) {
+        clear(config);
+    }
+}
+
 /// The master's snapshot is the acknowledgement. Local pending rules win until it matches.
 pub fn apply_master(config: &Path, cfg: &mut Config, settings: &MasterSettings) -> Result<()> {
     let edit = pending(config, cfg)?;
@@ -100,6 +117,27 @@ mod tests {
         let ack = MasterSettings::of(&f.cfg.network, "master");
         apply_master(&f.config, &mut f.cfg, &ack).unwrap();
         assert!(!path(&f.config).exists());
+    }
+
+    #[test]
+    fn outbox_is_dropped_when_it_no_longer_fits_the_config() {
+        let mut f = Fixture::new();
+        queue(&f.config, &f.cfg).unwrap();
+        drop_stale(&f.config, &f.cfg);
+        assert!(path(&f.config).exists());
+        f.cfg.network.peers.clear();
+        drop_stale(&f.config, &f.cfg);
+        assert!(!path(&f.config).exists());
+        let mut g = Fixture::new();
+        queue(&g.config, &g.cfg).unwrap();
+        g.cfg.network.role = Role::Master;
+        drop_stale(&g.config, &g.cfg);
+        assert!(!path(&g.config).exists());
+        let h = Fixture::new();
+        queue(&h.config, &h.cfg).unwrap();
+        clear(&h.config);
+        clear(&h.config);
+        assert!(!path(&h.config).exists());
     }
 
     #[test]
