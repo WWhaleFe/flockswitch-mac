@@ -1052,7 +1052,10 @@ impl SettingsApp {
             });
             hint(ui, p, if accepted { t.net_explain } else { t.net_notice_first });
             if on {
-                if let Some(error) = status.as_ref().and_then(|s| s.me.error.as_ref()) { ui.colored_label(p.red, error); }
+                if let Some(error) = status.as_ref().and_then(|s| s.me.error.as_ref()) {
+                    let error = if error == crate::net::PERMISSION_ERROR { t.net_permission_needed } else { error.as_str() };
+                    ui.colored_label(p.red, error);
+                }
             }
             if accepted {
                 ui.add_space(6.0);

@@ -98,6 +98,9 @@ extern "C" {
     fn NXClickTime(handle: u32) -> f64;
     fn NXCloseEventStatus(handle: u32);
 }
+/// The readiness error while a permission is missing; the settings window shows its own text for it.
+pub const PERMISSION_ERROR: &str = "Accessibility and Input Monitoring permission required";
+
 /// Lets this menu bar app hide the cursor while another app is in front (once per process).
 fn allow_background_cursor_hiding() {
     static ONCE: std::sync::Once = std::sync::Once::new();
@@ -704,7 +707,7 @@ impl Platform for MacPlatform {
         if permissions_ready() {
             Ok(())
         } else {
-            Err("Accessibility and Input Monitoring permission required".into())
+            Err(PERMISSION_ERROR.into())
         }
     }
     fn start_capture(&self, sink: Sender<InputEvent>) -> anyhow::Result<()> {

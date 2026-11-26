@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.0.1 - 2026-11-26
+
+- The settings window shows the missing-permission notice on the Network tab in the chosen language (it was always English).
+
 ## 2.0.0 - 2026-11-26
 
 - Share mouse, keyboard and clipboard between computers over the local network, with one master and up to three paired subs, authenticated TLS links and a refreshed settings window.
