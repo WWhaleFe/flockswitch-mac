@@ -11,6 +11,7 @@
 - Shift+Space is now a Korean/English key on every sender, so Shift held while pressing Space sends the toggle instead of a space (it can be turned off in the Keyboard page mapping).
 - Reconnecting fixes (see the network core): more reliable reconnection to a Mac on the same network.
 - Fixed: moving the mouse to a Linux computer could stutter; fixed in the macOS permission check cache.
+- Keyboard page: one switch, "Switch Korean/English with Shift+Space", turns Shift+Space on or off as a Korean/English key for every direction leaving this computer. Off, Space with Shift held types a space.
 
 ## 2.1.1 - 2026-11-27
 
