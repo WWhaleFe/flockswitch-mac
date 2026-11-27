@@ -498,7 +498,9 @@ struct SettingsApp {
     haptics_dialog: Option<HapticsDialog>,
     edge_confirm: bool,
     /// The computer picked on the layout map, waiting for an empty cell.
-    layout_pick: Option<String>,
+    layout_pick: Option<(String, u8)>,
+    /// The keyboard guide's details are open.
+    keys_guide_open: bool,
     /// This computer's network id (from the status, or read from the identity file).
     my_id: Option<String>,
     /// The keyboard pane: which OS pair and which direction of it is shown.
@@ -699,6 +701,7 @@ impl SettingsApp {
             haptics_dialog: None,
             edge_confirm: false,
             layout_pick: None,
+            keys_guide_open: false,
             my_id: None,
             key_pair: 0,
             key_dir: 0,
@@ -3459,10 +3462,11 @@ mod tests {
     fn the_fixed_size_fits_a_small_laptop_screen_and_the_widest_page() {
         // A 13-inch MacBook offers 1440x900 points less the menu bar and the Dock.
         assert!(WINDOW_SIZE[0] <= 1280.0 && WINDOW_SIZE[1] <= 800.0, "{WINDOW_SIZE:?}");
-        // The page beside the sidebar is wide enough for the 5-cell layout map: each
-        // cell at least 100 points (padding, scroll gutter, card margins, map padding).
+        // The page beside the sidebar is wide enough for the 6-column layout map: each
+        // cell at least 90 points (padding, scroll gutter, card margins, map padding).
         let page = WINDOW_SIZE[0] - SIDEBAR_WIDTH - 2.0 * PAGE_PADDING.x - 10.0 - 2.0 * 18.0 - 2.0 * 14.0;
-        assert!((page - 4.0 * 10.0) / 5.0 >= 100.0, "{page}");
+        let cell = (page - f32::from(flock_net::layout::COLS - 1) * 10.0) / f32::from(flock_net::layout::COLS);
+        assert!(cell >= 90.0, "{cell}");
         // The sidebar holds its three groups and eleven pages without scrolling.
         let sidebar = 40.0 + (4.0 + 16.0 + 16.0) + 3.0 * (16.0 + 2.0) + 11.0 * 34.0 + 12.0 + 60.0;
         // Down to 620 high (the smallest work-area fit on Windows) nothing scrolls.
@@ -3603,7 +3607,7 @@ mod tests {
                 crate::i18n::set_language(lang);
                 for page in pages {
                     app.page = page;
-                    app.layout_pick = Some("peer-a".into());
+                    app.layout_pick = Some(("peer-a".into(), 0));
                     for pair in 0..3 {
                         app.key_pair = pair;
                         for dir in 0..2 {

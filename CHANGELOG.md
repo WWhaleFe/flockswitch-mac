@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.2.0 - 2026-11-27
+
+- Layout grid is now 6 x 4 (was 5 x 3). Saved layouts keep working.
+- One cell per monitor: a computer with two monitors has two tiles on the layout map, labelled "name · 1" and "name · 2", sharing one style. Click a tile, then an empty cell, to move that one monitor. The cursor crosses only at the edge of the monitor that has a neighbour, and arrives on the matching monitor of the other computer.
+- Pause connection: each paired computer has a "Pause connection" switch next to Unpair. A paused computer stays paired and keeps its place, is not connected or crossed to, and is shown as "Paused" and dimmed in the list and on the map.
+- Keyboard page: a compatibility guide (short note and details) on what is mapped between Mac, Windows, Linux and Android and what is not.
+- Korean/English in all pairs, with Shift+Space as a key on every sender by default. Saved rules get Shift+Space once (a user who turns it off keeps it off).
+- A controlled Mac switches the input source directly (Korean and the previous Latin source) when the other computer sends the Korean/English toggle, which a 2.2 sender now sends to a Mac as a Lang1 key instead of a Caps Lock tap. A real Caps Lock from the other computer stays a real Caps Lock. A sender older than 2.2 still sends a Caps Lock tap, which a Mac receives as Caps Lock.
+- Shift+Space is now a Korean/English key on every sender, so Shift held while pressing Space sends the toggle instead of a space (it can be turned off in the Keyboard page mapping).
+- Reconnecting fixes (see the network core): more reliable reconnection to a Mac on the same network.
+- Fixed: moving the mouse to a Linux computer could stutter; fixed in the macOS permission check cache.
+- Keyboard page: one switch, "Switch Korean/English with Shift+Space", turns Shift+Space on or off as a Korean/English key for every direction leaving this computer. Off, Space with Shift held types a space.
+
 ## 2.1.1 - 2026-11-27
 
 - Fixed: with the Mac as master, it could not cross to a sub. When the helper that times a Caps Lock long press (reading the keyboard device directly) could not open, the whole input capture was cancelled. The helper is now optional; without it Caps Lock works as a short press (Korean/English). With Input Monitoring allowed, the long press works too.

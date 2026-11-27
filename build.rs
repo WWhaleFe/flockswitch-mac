@@ -15,6 +15,7 @@ fn main() {
     println!("cargo:rerun-if-changed=src/files_macos.m");
     println!("cargo:rerun-if-changed=src/wake_macos.m");
     println!("cargo:rerun-if-changed=src/caps_macos.m");
+    println!("cargo:rerun-if-changed=src/input_source_macos.m");
     println!("cargo:rerun-if-changed=build.rs");
 
     cc::Build::new()
@@ -23,6 +24,7 @@ fn main() {
         .file("src/files_macos.m")
         .file("src/wake_macos.m")
         .file("src/caps_macos.m")
+        .file("src/input_source_macos.m")
         .flag("-fobjc-arc")
         // Info.plist promises macOS 11; left alone, this follows the machine building it.
         .flag("-mmacosx-version-min=11.0")
@@ -31,6 +33,7 @@ fn main() {
     println!("cargo:rustc-link-lib=framework=Foundation");
     println!("cargo:rustc-link-lib=framework=AppKit");
     println!("cargo:rustc-link-lib=framework=QuartzCore");
+    println!("cargo:rustc-link-lib=framework=Carbon");
 
     let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let window_icon = master::scaled(Path::new(MASTER), WINDOW_ICON);

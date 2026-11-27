@@ -146,6 +146,33 @@ pub fn permissions() -> flock_net::Permissions {
     // kIOHIDRequestTypeListenEvent = 1, kIOHIDAccessTypeGranted = 0.
     unsafe { flock_net::Permissions { accessibility: AXIsProcessTrusted(), input_monitoring: IOHIDCheckAccess(1) == 0 } }
 }
+/// How often the background copy of the permissions is read again.
+const PERMISSION_REFRESH: Duration = Duration::from_secs(1);
+static PERMISSION_COPY: Mutex<Option<flock_net::Permissions>> = Mutex::new(None);
+/// The network service asks for the permissions on every pass of its loop, every 8 ms
+/// while this Mac controls another computer. Asking TCC takes about 8 ms a time and up
+/// to 30 ms, which held back the mouse motion sent to the other computer in uneven
+/// bursts, so the service reads a copy that a background thread refreshes every second.
+fn cached_permissions() -> flock_net::Permissions {
+    if let Some(p) = *PERMISSION_COPY.lock().unwrap() {
+        return p;
+    }
+    let fresh = permissions();
+    let mut copy = PERMISSION_COPY.lock().unwrap();
+    if copy.is_none() {
+        *copy = Some(fresh);
+        let spawned = thread::Builder::new().name("permission-copy".into()).spawn(|| loop {
+            thread::sleep(PERMISSION_REFRESH);
+            let p = permissions();
+            *PERMISSION_COPY.lock().unwrap() = Some(p);
+        });
+        if spawned.is_err() {
+            // Without the refresher, read TCC directly as before.
+            *copy = None;
+        }
+    }
+    fresh
+}
 pub fn reported_permissions() -> Option<flock_net::Permissions> {
     let bytes = std::fs::read(flock_net::status_path(config_dir())).ok()?;
     let status: Value = serde_json::from_slice(&bytes).ok()?;
@@ -228,7 +255,7 @@ pub fn network_side_ready(edge: Edge) -> bool {
     let status = live.service.status();
     // The computer in the neighbouring cell of the layout (a master's sub or, on a sub,
     // another sub), as long as its link is up.
-    let next = flock_net::layout::neighbour(&status.layout, &status.me.id, side);
+    let next = flock_net::layout::neighbour_on_side(&status.layout, &status.me.id, side);
     status.running
         && status.me.can_send
         && status.state.mode == "local"
@@ -498,6 +525,7 @@ pub fn spawn(shared: Arc<Shared>) -> JoinHandle<()> {
                                         port: config.port,
                                         error: Some(format!("{e:#}")),
                                         can_send: true,
+                                        displays: vec![],
                                     },
                                     discovered: vec![],
                                     peers: vec![],
@@ -620,6 +648,7 @@ fn first_caps_warning() -> bool { !CAPS_WARNED.swap(true, Ordering::Relaxed) }
 extern "C" {
     fn fs_caps_start(callback: unsafe extern "C" fn(Ref, bool, u64), context: Ref) -> Ref;
     fn fs_caps_stop(handle: Ref);
+    fn fs_input_source_toggle();
 }
 struct CapsMonitor(Ref);
 impl Drop for CapsMonitor { fn drop(&mut self) { unsafe { fs_caps_stop(self.0); } } }
@@ -775,9 +804,10 @@ impl Platform for MacPlatform {
     fn received_dir(&self) -> Option<PathBuf> {
         received_dir()
     }
-    fn permissions(&self) -> Option<flock_net::Permissions> { Some(permissions()) }
+    fn permissions(&self) -> Option<flock_net::Permissions> { Some(cached_permissions()) }
     fn ready(&self) -> Result<(), String> {
-        if permissions_ready() {
+        let p = cached_permissions();
+        if p.accessibility && p.input_monitoring {
             Ok(())
         } else {
             Err(PERMISSION_ERROR.into())
@@ -940,6 +970,15 @@ impl Platform for MacPlatform {
                     CGEventCreateScrollWheelEvent2(null_mut(), 0, 2, py, px, 0)
                 }
                 InputEvent::Key { usage, down } => {
+                    // While controlled, a Lang1 tap is the Korean/English toggle (what a 2.2
+                    // controller's rule sends for a Mac): switch the input source directly and
+                    // drop the key up. Caps Lock (0x39) is a normal Caps Lock key.
+                    if usage == 0x90 {
+                        if down {
+                            fs_input_source_toggle();
+                        }
+                        return;
+                    }
                     let Some(key) = keymap::hid_to_mac(usage) else {
                         return;
                     };
@@ -1196,7 +1235,7 @@ mod tests {
         config.network.peers.push(flock_net::PeerConfig { id: "p1".into(), name: "Laptop".into(), ..Default::default() });
         let status = |mode: &str, peer: Option<&str>| flock_net::Status {
             running: true,
-            me: flock_net::MeStatus { id: String::new(), name: String::new(), port: 0, error: None, can_send: true },
+            me: flock_net::MeStatus { id: String::new(), name: String::new(), port: 0, error: None, can_send: true, displays: vec![] },
             discovered: vec![],
             peers: vec![],
             state: flock_net::StateStatus { mode: mode.into(), peer: peer.map(Into::into) },
@@ -1220,10 +1259,10 @@ mod tests {
         config.network.on = true;
         config.network.notice_accepted = true;
         config.network.peers.push(flock_net::PeerConfig { id: "p1".into(), name: "Laptop".into(), ..Default::default() });
-        let peer = |id: &str, name: &str| flock_net::PeerStatus { id: id.into(), name: name.into(), os: None, connected: true, rtt_ms: None, can_send: true, via_master: true, keyrules: true };
+        let peer = |id: &str, name: &str| flock_net::PeerStatus { id: id.into(), name: name.into(), os: None, connected: true, rtt_ms: None, can_send: true, via_master: true, keyrules: true, displays: vec![], paused: false };
         let status = flock_net::Status {
             running: true,
-            me: flock_net::MeStatus { id: String::new(), name: String::new(), port: 0, error: None, can_send: true },
+            me: flock_net::MeStatus { id: String::new(), name: String::new(), port: 0, error: None, can_send: true, displays: vec![] },
             discovered: vec![],
             peers: vec![peer("p1", "Renamed"), peer("p2", "Desk"), peer("p3", "")],
             state: flock_net::StateStatus { mode: "controlling".into(), peer: Some("p2".into()) },

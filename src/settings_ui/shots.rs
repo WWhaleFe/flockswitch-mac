@@ -89,7 +89,7 @@ fn other(i: usize) -> PeerConfig {
 }
 
 fn cell(id: &str, col: u8, row: u8) -> Cell {
-    Cell { id: id.into(), col, row }
+    Cell::new(id, col, row)
 }
 
 /// The demo settings: this computer as master with two computers side by side to its
@@ -103,7 +103,15 @@ pub(super) fn demo_config() -> Config {
     net.name = ME_NAME.into();
     net.role = NetRole::Master;
     net.peers = (0..3).map(other).collect();
-    net.layout = vec![cell(ME, 1, 1), cell(OTHERS[0].0, 2, 1), cell(OTHERS[1].0, 3, 1), cell(OTHERS[2].0, 1, 2)];
+    // This Mac has two monitors (two tiles); the ThinkPad is paused.
+    net.peers[1].paused = true;
+    net.layout = vec![
+        cell(ME, 1, 1),
+        Cell::of_display(ME, 1, 0, 1),
+        cell(OTHERS[0].0, 2, 1),
+        cell(OTHERS[1].0, 3, 1),
+        cell(OTHERS[2].0, 1, 2),
+    ];
     let mut rules = flock_net::DirRules::default_for(Os::Mac, Os::Windows);
     rules.hangul_src = vec![flock_net::HangulKey::CapsLock];
     rules.caps_long_press = true;
@@ -117,19 +125,21 @@ pub(super) fn demo_status(cfg: &Config) -> flock_net::Status {
         id: p.id.clone(),
         name: p.name.clone(),
         os: Some(p.os),
-        connected: true,
+        connected: !p.paused,
         rtt_ms: Some(rtt),
         can_send: true,
         via_master: false,
         keyrules: true,
+        displays: Vec::new(),
+        paused: p.paused,
     };
     let rtts = [2.4, 3.1, 9.6];
     flock_net::Status {
         running: true,
-        me: MeStatus { id: ME.into(), name: cfg.network.name.clone(), port: flock_net::DEFAULT_PORT, error: None, can_send: true },
+        me: MeStatus { id: ME.into(), name: cfg.network.name.clone(), port: flock_net::DEFAULT_PORT, error: None, can_send: true, displays: vec![flock_net::Rect { x: 0.0, y: 0.0, width: 2560.0, height: 1440.0 }, flock_net::Rect { x: -1920.0, y: 0.0, width: 1920.0, height: 1080.0 }] },
         discovered: Vec::new(),
         peers: cfg.network.peers.iter().zip(rtts).map(|(p, r)| peer(p, r)).collect(),
-        state: StateStatus { mode: "controlling".into(), peer: Some(OTHERS[1].0.into()) },
+        state: StateStatus { mode: "controlling".into(), peer: Some(OTHERS[0].0.into()) },
         pairing: None,
         transfer: Some(TransferStatus {
             direction: "receive".into(),
@@ -137,7 +147,7 @@ pub(super) fn demo_status(cfg: &Config) -> flock_net::Status {
             done_bytes: 0,
             total_bytes: 0,
             stage: "done".into(),
-            saved_in: Some(format!("~/Downloads/flockswitch/{}", OTHERS[1].2)),
+            saved_in: Some(format!("~/Downloads/flockswitch/{}", OTHERS[0].2)),
         }),
         following: None,
         layout: cfg.network.layout.clone(),
@@ -186,6 +196,7 @@ impl SettingsApp {
         self.page = *page;
         if *page == Page::Keys {
             (self.key_pair, self.key_dir) = (0, KEY_DIR);
+            self.keys_guide_open = true;
         }
         if !shots.asked {
             shots.frames += 1;
