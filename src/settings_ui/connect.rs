@@ -10,11 +10,15 @@ use flock_net::Role as NetRole;
 /// One occupied cell of the layout map, as drawn.
 struct MapCell {
     id: String,
+    /// The computer's monitor this tile stands for (0 = first).
+    display: u8,
     name: String,
     /// Under the name: the system, or "This computer", or "Disconnected".
     detail: String,
     mine: bool,
     away: bool,
+    /// The connection to this computer is paused (shown dimmed).
+    paused: bool,
     /// The mouse is on this computer.
     here: bool,
 }
@@ -23,8 +27,8 @@ struct MapCell {
 #[derive(Debug, PartialEq)]
 enum MapClick {
     Nothing,
-    /// Pick up (or put down) this computer.
-    Pick(String),
+    /// Pick up (or put down) this monitor tile: the computer and its monitor.
+    Pick(String, u8),
     /// Put the picked computer into this empty cell.
     Place(u8, u8),
 }
@@ -316,7 +320,9 @@ impl SettingsApp {
                 divider(ui, p);
             }
             let link = live.and_then(|s| s.peers.iter().find(|s| s.id == peer.id)).filter(|s| s.connected);
+            let paused = peer.paused || live.is_some_and(|s| s.peers.iter().any(|x| x.id == peer.id && x.paused));
             let state = match link {
+                _ if paused => format!("{} · {}", if master { os_label(peer.os) } else { t.net_role_master }, t.net_paused),
                 Some(l) => {
                     let delay = l.rtt_ms.map(|ms| format!(" · {ms:.1} ms")).unwrap_or_default();
                     format!("{} · {}{delay}", if master { os_label(peer.os) } else { t.net_role_master }, t.net_connected)
@@ -324,15 +330,28 @@ impl SettingsApp {
                 None => format!("{} · {}", if master { os_label(peer.os) } else { t.net_role_master }, t.net_offline),
             };
             let with_switch = master;
-            let height = if with_switch { 88.0 } else { 58.0 };
+            let height = if with_switch { 116.0 } else { 86.0 };
             let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
             let painter = ui.painter();
             let left = rect.left();
-            painter.text(Pos2::new(left, rect.top() + 11.0), Align2::LEFT_TOP, &peer.name, FontId::proportional(14.5), p.text);
+            // A paused computer is dimmed.
+            let name_color = if paused { p.muted } else { p.text };
+            painter.text(Pos2::new(left, rect.top() + 11.0), Align2::LEFT_TOP, &peer.name, FontId::proportional(14.5), name_color);
             let dot = Pos2::new(left + 3.0, rect.top() + 38.0);
-            painter.circle_filled(dot, 3.0, if link.is_some() { p.green } else { p.off });
+            painter.circle_filled(dot, 3.0, if link.is_some() && !paused { p.green } else { p.off });
             painter.text(Pos2::new(left + 14.0, rect.top() + 38.0), Align2::LEFT_CENTER, state, mono(12.0), p.muted);
             let mut flip = None;
+            let mut pause_flip = None;
+            let pause_top = rect.top() + if with_switch { 82.0 } else { 54.0 };
+            let area = Rect::from_min_size(Pos2::new(left, pause_top), Vec2::new(rect.width() - 100.0, 24.0));
+            ui.new_child(UiBuilder::new().max_rect(area).layout(egui::Layout::left_to_right(egui::Align::Center))).scope(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                let mut on = peer.paused;
+                if mini_switch(ui, p, t.net_pause, &mut on) {
+                    pause_flip = Some(on);
+                }
+                ui.add(egui::Label::new(RichText::new(t.net_pause).size(12.5).color(p.muted)).truncate());
+            });
             if with_switch {
                 let area = Rect::from_min_size(Pos2::new(left, rect.top() + 54.0), Vec2::new(rect.width() - 100.0, 24.0));
                 ui.new_child(UiBuilder::new().max_rect(area).layout(egui::Layout::left_to_right(egui::Align::Center))).scope(|ui| {
@@ -350,6 +369,14 @@ impl SettingsApp {
             ui.new_child(UiBuilder::new().max_rect(area)).scope(|ui| unpair = button(ui, p, t.net_unpair, ButtonKind::Danger).clicked());
             if unpair {
                 self.net_request(flock_net::Request::Unpair { unpair: peer.id.clone() });
+            }
+            if let Some(on) = pause_flip {
+                let id = peer.id.clone();
+                self.apply(|c| {
+                    if let Some(x) = c.network.peers.iter_mut().find(|x| x.id == id) {
+                        x.paused = on;
+                    }
+                });
             }
             if let Some(on) = flip {
                 let id = peer.id.clone();
@@ -375,9 +402,11 @@ impl SettingsApp {
         let master = net.role == NetRole::Master;
         let editable = master && known_me;
         let running = status.filter(|s| s.running);
+        // The running service's layout already has every monitor placed (auto-placement) and
+        // is what a move starts from; before it runs, the saved layout stands in.
         let cells: Vec<Cell> = match running.map(|s| s.layout.clone()).filter(|c| !c.is_empty()) {
-            Some(cells) if !master => cells,
-            _ => logic::effective_cells(&net, &me),
+            Some(cells) => cells,
+            None => logic::effective_cells(&net, &me),
         };
         // The dot follows the controlled computer by id, also when it is a sub reached
         // through the master (the roster), not only a paired one.
@@ -414,6 +443,14 @@ impl SettingsApp {
             let found = discovered.iter().find(|d| d.id == cell.id);
             let connected = mine || running.is_some_and(|s| s.peers.iter().any(|x| x.id == cell.id && x.connected));
             let live = running.and_then(|s| s.peers.iter().find(|x| x.id == cell.id));
+            // A computer with more than one monitor labels its tiles "<name> · <n>".
+            let monitors = if mine {
+                running.map_or(0, |s| s.me.displays.len())
+            } else {
+                live.map_or(0, |x| x.displays.len())
+            };
+            let monitors = monitors.max(cells.iter().filter(|c| c.id == cell.id).count());
+            let paused = !mine && (known.is_some_and(|x| x.paused) || live.is_some_and(|x| x.paused));
             let name = if mine {
                 my_name.clone().unwrap_or_else(|| t.net_this_computer.to_string())
             } else {
@@ -423,8 +460,11 @@ impl SettingsApp {
             };
             let os = live.and_then(|x| x.os).or_else(|| known.map(|x| x.os)).or_else(|| found.map(|d| d.os));
             let os_text = os.map(os_label).unwrap_or_default();
+            let name = if monitors > 1 { format!("{name} · {}", u32::from(cell.display) + 1) } else { name };
             let detail = if mine {
                 t.net_this_computer.to_string()
+            } else if paused {
+                t.net_paused.to_string()
             } else if connected {
                 if !master && known.is_some() { t.net_role_master.to_string() } else { os_text.to_string() }
             } else {
@@ -432,15 +472,17 @@ impl SettingsApp {
             };
             grid[idx] = Some(MapCell {
                 id: cell.id.clone(),
+                display: cell.display,
                 name,
                 detail,
                 mine,
                 away: !connected,
+                paused,
                 here: mouse_at.as_deref() == Some(cell.id.as_str()),
             });
         }
         let picked = self.layout_pick.clone().filter(|_| editable);
-        let click = draw_map(ui, p, t, &grid, picked.as_deref(), editable);
+        let click = draw_map(ui, p, t, &grid, picked.as_ref().map(|(id, d)| (id.as_str(), *d)), editable);
 
         // Computers paired but not on the map yet.
         let known: Vec<String> = std::iter::once(me.clone()).chain(net.peers.iter().map(|x| x.id.clone())).collect();
@@ -451,9 +493,10 @@ impl SettingsApp {
                 ui.label(RichText::new(t.layout_unplaced).size(12.5).color(p.muted));
                 for id in &loose {
                     let name = crate::net::peer_name(&net, running, id).unwrap_or_else(|| id.to_string());
-                    let kind = if picked.as_deref() == Some(*id) { ButtonKind::Primary } else { ButtonKind::Plain };
+                    let this = Some((id.to_string(), 0));
+                    let kind = if picked == this { ButtonKind::Primary } else { ButtonKind::Plain };
                     if button(ui, p, &name, kind).clicked() {
-                        self.layout_pick = if picked.as_deref() == Some(*id) { None } else { Some(id.to_string()) };
+                        self.layout_pick = if picked == this { None } else { this };
                     }
                 }
             });
@@ -461,11 +504,17 @@ impl SettingsApp {
 
         match click {
             MapClick::Nothing => {}
-            MapClick::Pick(id) => self.layout_pick = if picked.as_deref() == Some(id.as_str()) { None } else { Some(id) },
+            MapClick::Pick(id, display) => {
+                let this = Some((id, display));
+                self.layout_pick = if picked == this { None } else { this };
+            }
             MapClick::Place(col, row) => {
-                if let Some(id) = picked {
-                    if let Some(next) = logic::move_to(&cells, &known, &id, col, row) {
-                        self.apply(|c| logic::set_layout(&mut c.network, &me, next));
+                if let Some((id, display)) = picked {
+                    if let Some(next) = logic::move_to(&cells, &known, &id, display, col, row) {
+                        self.apply(|c| {
+                            let next = logic::with_hidden(&c.network.layout, &cells, next);
+                            logic::set_layout(&mut c.network, &me, next)
+                        });
                     }
                 }
                 self.layout_pick = None;
@@ -748,8 +797,8 @@ fn button_small(ui: &mut Ui, p: Palette, label: &str) -> Response {
     button(ui, p, label, ButtonKind::Plain)
 }
 
-/// Draws the 5x3 map and says what was clicked.
-fn draw_map(ui: &mut Ui, p: Palette, t: &Texts, grid: &[Option<MapCell>], picked: Option<&str>, editable: bool) -> MapClick {
+/// Draws the 6x4 map and says what was clicked.
+fn draw_map(ui: &mut Ui, p: Palette, t: &Texts, grid: &[Option<MapCell>], picked: Option<(&str, u8)>, editable: bool) -> MapClick {
     let (pad, gutter, cell_h) = (14.0_f32, 10.0_f32, 76.0_f32);
     let (cols, rows) = (f32::from(COLS), f32::from(ROWS));
     let width = ui.available_width();
@@ -790,15 +839,15 @@ fn draw_map(ui: &mut Ui, p: Palette, t: &Texts, grid: &[Option<MapCell>], picked
                     } else {
                         painter.add(Shape::Vec(ghost_shapes(r, 12.0, p)));
                     }
-                    if picked == Some(cell.id.as_str()) {
+                    if picked == Some((cell.id.as_str(), cell.display)) {
                         painter.rect_stroke(r.expand(2.0), 14, Stroke::new(2.0, p.text), StrokeKind::Outside);
                     }
-                    let name_w = r.width() - 28.0 - if cell.here { 16.0 } else { 0.0 };
+                    let name_w = r.width() - 28.0;
                     let name = elided(ui, &cell.name, bold(14.0), p.text, name_w);
                     painter.galley(r.left_top() + Vec2::new(14.0, 12.0), name, p.text);
                     if cell.here {
                         // The one lime mark: the mouse is here.
-                        let c = Pos2::new(r.right() - 18.0, r.top() + 21.0);
+                        let c = Pos2::new(r.right() - 18.0, r.bottom() - 18.0);
                         painter.circle_filled(c, 6.0, p.accent.gamma_multiply(0.35));
                         painter.circle_filled(c, 4.0, p.accent);
                         let hover = Rect::from_center_size(c, Vec2::splat(16.0));
@@ -806,10 +855,14 @@ fn draw_map(ui: &mut Ui, p: Palette, t: &Texts, grid: &[Option<MapCell>], picked
                     }
                     let dot = Pos2::new(r.left() + 17.0, r.bottom() - 18.0);
                     painter.circle_filled(dot, 3.0, if cell.away { p.off } else { p.green });
-                    let detail = elided(ui, &cell.detail, FontId::proportional(12.0), p.muted, r.width() - 40.0);
+                    let detail = elided(ui, &cell.detail, FontId::proportional(12.0), p.muted, r.width() - 40.0 - if cell.here { 14.0 } else { 0.0 });
                     painter.galley(Pos2::new(r.left() + 28.0, r.bottom() - 18.0 - detail.size().y / 2.0), detail, p.muted);
+                    if cell.paused {
+                        // Dimmed: the map's own ground laid back over the tile.
+                        painter.rect_filled(r, 12, p.hover.gamma_multiply(0.6));
+                    }
                     if resp.clicked() {
-                        click = MapClick::Pick(cell.id.clone());
+                        click = MapClick::Pick(cell.id.clone(), cell.display);
                     }
                 }
                 None => {

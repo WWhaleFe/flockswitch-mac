@@ -648,6 +648,7 @@ fn first_caps_warning() -> bool { !CAPS_WARNED.swap(true, Ordering::Relaxed) }
 extern "C" {
     fn fs_caps_start(callback: unsafe extern "C" fn(Ref, bool, u64), context: Ref) -> Ref;
     fn fs_caps_stop(handle: Ref);
+    fn fs_input_source_toggle();
 }
 struct CapsMonitor(Ref);
 impl Drop for CapsMonitor { fn drop(&mut self) { unsafe { fs_caps_stop(self.0); } } }
@@ -969,6 +970,15 @@ impl Platform for MacPlatform {
                     CGEventCreateScrollWheelEvent2(null_mut(), 0, 2, py, px, 0)
                 }
                 InputEvent::Key { usage, down } => {
+                    // While controlled, a Caps Lock tap is the Korean/English toggle (what the
+                    // controller's rule sends for a Mac): switch the input source directly and
+                    // drop the key up. A real Caps Lock from the controller toggles it too.
+                    if usage == 0x39 {
+                        if down {
+                            fs_input_source_toggle();
+                        }
+                        return;
+                    }
                     let Some(key) = keymap::hid_to_mac(usage) else {
                         return;
                     };

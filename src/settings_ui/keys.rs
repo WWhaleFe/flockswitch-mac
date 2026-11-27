@@ -90,6 +90,27 @@ impl SettingsApp {
         gap(ui);
         section_head(ui, p, t.keys_section, None, |ui| head_note(ui, t.keys_section_note, p.muted));
         card_pad(ui, p, |ui| self.key_pane(ui, t, p));
+        gap(ui);
+        card_pad(ui, p, |ui| self.keys_guide(ui, t, p));
+    }
+
+    /// The compatibility guide: one short note, and the details behind "Details".
+    fn keys_guide(&mut self, ui: &mut Ui, t: &Texts, p: Palette) {
+        ui.label(RichText::new(t.keys_guide_note).size(13.0).color(p.text));
+        ui.add_space(6.0);
+        let label = if self.keys_guide_open { t.keys_guide_less } else { t.keys_guide_more };
+        let link = ui
+            .add(egui::Label::new(RichText::new(label).size(12.5).color(p.text).underline()).sense(Sense::click()))
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        if link.clicked() {
+            self.keys_guide_open = !self.keys_guide_open;
+        }
+        if self.keys_guide_open {
+            for line in t.keys_guide {
+                ui.add_space(8.0);
+                ui.add(egui::Label::new(RichText::new(line).size(12.5).color(p.muted)).wrap());
+            }
+        }
     }
 
     /// The tabs (the system to pair with, the direction) and the rules of that direction.

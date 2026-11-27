@@ -1011,8 +1011,14 @@ impl Config {
             return Ok(cfg);
         }
         let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        let cfg = Config::parse(&text).with_context(|| format!("parsing {}", path.display()))?;
+        let mut cfg = Config::parse(&text).with_context(|| format!("parsing {}", path.display()))?;
         cfg.validate()?;
+        // One-time default key rule change (Shift+Space as a Korean/English key): save it.
+        if cfg.network.apply_hangul_defaults() {
+            if let Err(e) = cfg.save_at(path) {
+                log::warn!("saving the default key rules: {e:#}");
+            }
+        }
         Ok(cfg)
     }
 

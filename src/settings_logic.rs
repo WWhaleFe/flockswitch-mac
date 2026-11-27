@@ -22,16 +22,29 @@ pub fn cell_at(cells: &[Cell], col: u8, row: u8) -> Option<&Cell> {
     cells.iter().find(|c| (c.col, c.row) == (col, row))
 }
 
-/// Moves (or first places) the computer `id` into the empty cell (`col`, `row`). None
-/// when that is not allowed: the cell is outside the grid or taken, or `id` is not one
-/// of `known` (this computer and the paired ones).
-pub fn move_to(cells: &[Cell], known: &[String], id: &str, col: u8, row: u8) -> Option<Vec<Cell>> {
+/// Moves (or first places) one monitor tile, monitor `display` of computer `id`, into the
+/// empty cell (`col`, `row`). The computer's other monitor tiles stay where they are.
+/// None when that is not allowed: the cell is outside the grid or taken, or `id` is not
+/// one of `known` (this computer and the paired ones).
+pub fn move_to(cells: &[Cell], known: &[String], id: &str, display: u8, col: u8, row: u8) -> Option<Vec<Cell>> {
     if col >= COLS || row >= ROWS || !known.iter().any(|k| k == id) || cell_at(cells, col, row).is_some() {
         return None;
     }
-    let mut next: Vec<Cell> = cells.iter().filter(|c| c.id != id).cloned().collect();
-    next.push(Cell::new(id, col, row));
+    let mut next: Vec<Cell> = cells.iter().filter(|c| !(c.id == id && c.display == display)).cloned().collect();
+    next.push(Cell::of_display(id, display, col, row));
     Some(next)
+}
+
+/// `next` (made from the cells shown) plus the saved cells that are not shown, such as
+/// those of a monitor that is unplugged for now: the saved layout keeps them. A kept cell
+/// that would sit on a taken position is dropped by `layout::valid_cells` later.
+pub fn with_hidden(saved: &[Cell], shown: &[Cell], mut next: Vec<Cell>) -> Vec<Cell> {
+    for c in saved {
+        if !shown.iter().any(|s| s.id == c.id && s.display == c.display) {
+            next.push(c.clone());
+        }
+    }
+    next
 }
 
 /// The known computers that have no cell (peers without a 2.0 side start like this).
@@ -213,20 +226,41 @@ mod tests {
         let known = ids(&["me", "a", "b"]);
         let cells = vec![cell("me", 2, 1), cell("a", 1, 1)];
         // To an empty cell.
-        let moved = move_to(&cells, &known, "a", 4, 2).unwrap();
+        let moved = move_to(&cells, &known, "a", 0, 4, 2).unwrap();
         assert_eq!(cell_at(&moved, 4, 2).map(|c| c.id.as_str()), Some("a"));
         assert!(cell_at(&moved, 1, 1).is_none());
         assert_eq!(moved.len(), 2);
         // An unplaced computer is placed.
-        let placed = move_to(&cells, &known, "b", 0, 0).unwrap();
+        let placed = move_to(&cells, &known, "b", 0, 0, 0).unwrap();
         assert_eq!(placed.len(), 3);
         // The master moves too.
-        assert!(move_to(&cells, &known, "me", 2, 0).is_some());
+        assert!(move_to(&cells, &known, "me", 0, 2, 0).is_some());
         // Taken cell, outside the grid, unknown computer: refused.
-        assert!(move_to(&cells, &known, "a", 2, 1).is_none());
-        assert!(move_to(&cells, &known, "a", COLS, 0).is_none());
-        assert!(move_to(&cells, &known, "a", 0, ROWS).is_none());
-        assert!(move_to(&cells, &known, "ghost", 0, 0).is_none());
+        assert!(move_to(&cells, &known, "a", 0, 2, 1).is_none());
+        assert!(move_to(&cells, &known, "a", 0, COLS, 0).is_none());
+        assert!(move_to(&cells, &known, "a", 0, 0, ROWS).is_none());
+        assert!(move_to(&cells, &known, "ghost", 0, 0, 0).is_none());
+    }
+
+    #[test]
+    fn moving_one_monitor_tile_leaves_the_others_of_that_computer() {
+        let known = ids(&["me", "a"]);
+        let cells = vec![cell("me", 2, 1), Cell::of_display("a", 0, 1, 1), Cell::of_display("a", 1, 0, 1)];
+        let moved = move_to(&cells, &known, "a", 1, 5, 3).unwrap();
+        assert_eq!(moved.len(), 3);
+        assert!(moved.contains(&Cell::of_display("a", 0, 1, 1)));
+        assert!(moved.contains(&Cell::of_display("a", 1, 5, 3)));
+        assert!(!moved.iter().any(|c| (c.col, c.row) == (0, 1)));
+    }
+
+    #[test]
+    fn tiles_of_a_missing_monitor_stay_in_the_saved_layout() {
+        let saved = vec![cell("me", 2, 1), Cell::of_display("a", 0, 1, 1), Cell::of_display("a", 1, 0, 1)];
+        let shown = vec![cell("me", 2, 1), Cell::of_display("a", 0, 1, 1)];
+        let next = move_to(&shown, &ids(&["me", "a"]), "a", 0, 3, 1).unwrap();
+        let kept = with_hidden(&saved, &shown, next);
+        assert!(kept.contains(&Cell::of_display("a", 1, 0, 1)) && kept.contains(&Cell::of_display("a", 0, 3, 1)));
+        assert_eq!(kept.len(), 3);
     }
 
     #[test]
