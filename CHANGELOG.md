@@ -6,6 +6,7 @@
 - When crossing cannot start, it no longer retries every 8 ms: it waits 2 s, up to 30 s, before trying again, and shows the reason.
 - Quitting the app, or the app restarting after an update, closes the settings window too.
 - The flockswitch icon shows in the Dock while the settings window is open.
+- Fixed having to add and switch on Accessibility and Input Monitoring again after every update. When a new version started and the permissions briefly read as off, the app removed its own entries. It no longer resets them by itself (only with the button on the permissions card), restarts go through macOS app launching, and permissions are re-checked for 3 s before deciding. Moving to 2.1.1 may need them switched on once more.
 
 ## 2.1.0 - 2026-11-27
 
