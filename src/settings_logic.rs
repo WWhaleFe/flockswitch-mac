@@ -30,7 +30,7 @@ pub fn move_to(cells: &[Cell], known: &[String], id: &str, col: u8, row: u8) -> 
         return None;
     }
     let mut next: Vec<Cell> = cells.iter().filter(|c| c.id != id).cloned().collect();
-    next.push(Cell { id: id.into(), col, row });
+    next.push(Cell::new(id, col, row));
     Some(next)
 }
 
@@ -191,7 +191,7 @@ mod tests {
     use flock_net::{PeerConfig, Side};
 
     fn cell(id: &str, col: u8, row: u8) -> Cell {
-        Cell { id: id.into(), col, row }
+        Cell::new(id, col, row)
     }
     fn ids(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
@@ -224,8 +224,8 @@ mod tests {
         assert!(move_to(&cells, &known, "me", 2, 0).is_some());
         // Taken cell, outside the grid, unknown computer: refused.
         assert!(move_to(&cells, &known, "a", 2, 1).is_none());
-        assert!(move_to(&cells, &known, "a", 5, 0).is_none());
-        assert!(move_to(&cells, &known, "a", 0, 3).is_none());
+        assert!(move_to(&cells, &known, "a", COLS, 0).is_none());
+        assert!(move_to(&cells, &known, "a", 0, ROWS).is_none());
         assert!(move_to(&cells, &known, "ghost", 0, 0).is_none());
     }
 

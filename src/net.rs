@@ -255,7 +255,7 @@ pub fn network_side_ready(edge: Edge) -> bool {
     let status = live.service.status();
     // The computer in the neighbouring cell of the layout (a master's sub or, on a sub,
     // another sub), as long as its link is up.
-    let next = flock_net::layout::neighbour(&status.layout, &status.me.id, side);
+    let next = flock_net::layout::neighbour_on_side(&status.layout, &status.me.id, side);
     status.running
         && status.me.can_send
         && status.state.mode == "local"
@@ -525,6 +525,7 @@ pub fn spawn(shared: Arc<Shared>) -> JoinHandle<()> {
                                         port: config.port,
                                         error: Some(format!("{e:#}")),
                                         can_send: true,
+                                        displays: vec![],
                                     },
                                     discovered: vec![],
                                     peers: vec![],
@@ -1224,7 +1225,7 @@ mod tests {
         config.network.peers.push(flock_net::PeerConfig { id: "p1".into(), name: "Laptop".into(), ..Default::default() });
         let status = |mode: &str, peer: Option<&str>| flock_net::Status {
             running: true,
-            me: flock_net::MeStatus { id: String::new(), name: String::new(), port: 0, error: None, can_send: true },
+            me: flock_net::MeStatus { id: String::new(), name: String::new(), port: 0, error: None, can_send: true, displays: vec![] },
             discovered: vec![],
             peers: vec![],
             state: flock_net::StateStatus { mode: mode.into(), peer: peer.map(Into::into) },
@@ -1248,10 +1249,10 @@ mod tests {
         config.network.on = true;
         config.network.notice_accepted = true;
         config.network.peers.push(flock_net::PeerConfig { id: "p1".into(), name: "Laptop".into(), ..Default::default() });
-        let peer = |id: &str, name: &str| flock_net::PeerStatus { id: id.into(), name: name.into(), os: None, connected: true, rtt_ms: None, can_send: true, via_master: true, keyrules: true };
+        let peer = |id: &str, name: &str| flock_net::PeerStatus { id: id.into(), name: name.into(), os: None, connected: true, rtt_ms: None, can_send: true, via_master: true, keyrules: true, displays: vec![], paused: false };
         let status = flock_net::Status {
             running: true,
-            me: flock_net::MeStatus { id: String::new(), name: String::new(), port: 0, error: None, can_send: true },
+            me: flock_net::MeStatus { id: String::new(), name: String::new(), port: 0, error: None, can_send: true, displays: vec![] },
             discovered: vec![],
             peers: vec![peer("p1", "Renamed"), peer("p2", "Desk"), peer("p3", "")],
             state: flock_net::StateStatus { mode: "controlling".into(), peer: Some("p2".into()) },

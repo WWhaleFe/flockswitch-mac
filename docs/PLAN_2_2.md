@@ -138,6 +138,35 @@ README where layout/pause/keyboard is described, Korean and English texts, never
   into the next syllable, compound vowels, backspace).
 - Show the current mode (한/A) in the notification or the overlay corner.
 
+### B5. Korean/English switching in all nine master -> receiver pairs (user requirement)
+Masters: macOS, Windows, Linux. Receivers: the other systems including Android. The nine
+pairs: mac->win, mac->linux, mac->android, win->mac, win->linux, win->android,
+linux->mac, linux->win, linux->android. In every pair, pressing the sender's usual
+Korean/English key (mac: Caps Lock short press, Control+Space or the configured key;
+Windows: the Hangul key / right Alt on Korean layouts; Linux: the Hangul key or Shift+Space
+per the configured rule) must switch the receiver's input between Korean and English
+naturally, with no stuck modifiers, no double toggles and no extra characters, and the
+receiver's own switching keys must keep working when typing on the receiver directly.
+- Sender side (netcore keymap.rs / key rules): audit every pair's default rule and the HID
+  usage it produces for the receiver; make the defaults right for each pair; table-driven
+  unit tests covering all nine pairs (key down/up sequences in, events out).
+- Receiver side, most reliable method per system:
+  - macOS receiver: switch the input source directly (Text Input Sources API: select the
+    Korean source or the ABC source, or toggle between the two most recent) instead of
+    replaying Caps Lock, which macOS times and may treat as a capital-letter lock.
+  - Windows receiver: inject VK_HANGUL (scan code 0x72 / extended per the Korean IME) so the
+    Microsoft IME toggles; verify with the right Alt variant too.
+  - Linux receiver: inject KEY_HANGEUL (evdev 122) which ibus-hangul and fcitx5-hangul
+    toggle on by default; Shift+Space only if the rule says so.
+  - Android receiver: the in-app Hangul composition of B4.
+- **Shift+Space on every sender (user requirement):** in every pair's default rule,
+  Shift+Space is also a Korean/English key (in addition to the system's usual one), so
+  pressing Shift+Space on any master switches the receiver. Existing saved rules gain it
+  once (migration adds it if the user never removed it; do not re-add after the user turns it
+  off - keep a "defaults applied" marker). On a receiver whose own toggle already is
+  Shift+Space, send the receiver's toggle once, never Shift+Space plus a toggle.
+- Document the result in the keyboard compatibility guide (B3).
+
 ## C. Review and release
 - Cross-review netcore changes (another model) before copying.
 - Each port: local checks (cargo test/clippy, windows `cargo check --target
