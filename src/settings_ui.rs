@@ -69,6 +69,56 @@ pub fn shots_dir() -> Option<&'static std::path::PathBuf> {
     shots::dir()
 }
 
+/// The byte the background app sends to the open settings window when it quits.
+pub const KNOCK_QUIT: u8 = b'q';
+
+/// Set when the background app is gone (or said it quits): the window closes.
+static CLOSE_NOW: AtomicBool = AtomicBool::new(false);
+
+/// Reads the one byte of a knock (nothing sent = just bring the window forward) and says
+/// whether it is the quit message.
+fn knock_is_quit(stream: Option<std::net::TcpStream>) -> bool {
+    use std::io::Read;
+    let Some(mut stream) = stream else { return false };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(300)));
+    let mut byte = [0u8; 1];
+    matches!(stream.read(&mut byte), Ok(1)) && byte[0] == KNOCK_QUIT
+}
+
+/// Tells an open settings window that the background app quits, so it closes too.
+pub fn tell_settings_to_quit() {
+    use std::io::Write;
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], crate::INSTANCE_PORT + 1));
+    if let Ok(mut stream) = std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(300)) {
+        let _ = stream.write_all(&[KNOCK_QUIT]);
+    }
+}
+
+/// Follows whether the background app is running. A window opened on its own (no
+/// background app ever seen) stays; once the app was seen and is gone for two polls in
+/// a row, the window should close.
+#[derive(Default)]
+struct BackgroundWatch {
+    seen: bool,
+    missing: u8,
+}
+
+impl BackgroundWatch {
+    /// One poll; true when the window should close.
+    fn poll(&mut self, running: bool) -> bool {
+        if running {
+            self.seen = true;
+            self.missing = 0;
+            return false;
+        }
+        if !self.seen {
+            return false;
+        }
+        self.missing = self.missing.saturating_add(1);
+        self.missing >= 2
+    }
+}
+
 /// Opens the window. `lock` keeps a second window from opening; a connection to it
 /// means "Settings…" was chosen again, so the window comes back to the front.
 /// `show_update` opens on the General page (from the "new version" menu item).
@@ -80,7 +130,14 @@ pub fn run(lock: std::net::TcpListener, show_update: bool) -> Result<()> {
     }
     let t = texts();
     let icon = egui::IconData { rgba: ICON_RGBA.to_vec(), width: ICON_SIDE, height: ICON_SIDE };
-    let options = eframe::NativeOptions { viewport: window_builder(t.settings_title, icon), ..Default::default() };
+    let mut options = eframe::NativeOptions { viewport: window_builder(t.settings_title, icon), ..Default::default() };
+    // The menu-bar app is an accessory (no Dock icon); this window is a normal app while
+    // it is open, with its Dock icon (eframe sets the icon image from the viewport icon).
+    options.event_loop_builder = Some(Box::new(|builder| {
+        use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
+        builder.with_activation_policy(ActivationPolicy::Regular);
+        builder.with_activate_ignoring_other_apps(true);
+    }));
     eframe::run_native(
         "flockswitch-settings",
         options,
@@ -90,10 +147,25 @@ pub fn run(lock: std::net::TcpListener, show_update: bool) -> Result<()> {
             install_style(&cc.egui_ctx);
             let raise = Arc::new(AtomicBool::new(false));
             let (ctx, flag) = (cc.egui_ctx.clone(), raise.clone());
+            let watch_ctx = ctx.clone();
             std::thread::spawn(move || {
-                for _ in lock.incoming() {
-                    flag.store(true, Ordering::Relaxed);
+                for knock in lock.incoming() {
+                    if knock_is_quit(knock.ok()) {
+                        CLOSE_NOW.store(true, Ordering::SeqCst);
+                    } else {
+                        flag.store(true, Ordering::Relaxed);
+                    }
                     ctx.request_repaint();
+                }
+            });
+            std::thread::spawn(move || {
+                let mut watch = BackgroundWatch::default();
+                loop {
+                    std::thread::sleep(Duration::from_secs(1));
+                    if watch.poll(crate::main_instance_running()) {
+                        CLOSE_NOW.store(true, Ordering::SeqCst);
+                        watch_ctx.request_repaint();
+                    }
                 }
             });
             Ok(Box::new(SettingsApp::new(&cc.egui_ctx, raise, show_update)))
@@ -821,6 +893,10 @@ impl SettingsApp {
             let panel = egui::Frame::new().inner_margin(Margin::symmetric(18, 12));
             egui::CentralPanel::default().frame(panel).show(ui, |ui| self.uninstall_result(ui, t, p));
             return;
+        }
+        // The background app quit: close, unless an uninstall is showing its result.
+        if CLOSE_NOW.load(Ordering::SeqCst) && !matches!(self.uninstall, Uninstall::Waiting(_) | Uninstall::Done) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         if self.last_refresh.elapsed() >= REFRESH {
             self.refresh();
@@ -3335,6 +3411,37 @@ impl SettingsApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn background_watch_closes_only_after_the_app_was_seen() {
+        let mut alone = BackgroundWatch::default();
+        assert!(!alone.poll(false) && !alone.poll(false) && !alone.poll(false));
+        let mut w = BackgroundWatch::default();
+        assert!(!w.poll(true));
+        assert!(!w.poll(false));
+        assert!(w.poll(false));
+        let mut blip = BackgroundWatch::default();
+        blip.poll(true);
+        assert!(!blip.poll(false));
+        assert!(!blip.poll(true));
+        assert!(!blip.poll(false));
+    }
+
+    #[test]
+    fn knock_bytes() {
+        use std::io::Write;
+        let l = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = l.local_addr().unwrap();
+        for (send, quit) in [(Some(KNOCK_QUIT), true), (Some(b'u'), false), (None, false)] {
+            let mut c = std::net::TcpStream::connect(addr).unwrap();
+            if let Some(b) = send {
+                c.write_all(&[b]).unwrap();
+            }
+            drop(c);
+            let (s, _) = l.accept().unwrap();
+            assert_eq!(knock_is_quit(Some(s)), quit);
+        }
+    }
 
     #[test]
     fn the_window_has_one_fixed_size() {

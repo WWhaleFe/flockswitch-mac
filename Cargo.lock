@@ -1462,6 +1462,7 @@ dependencies = [
  "tao",
  "toml",
  "tray-icon",
+ "winit",
 ]
 
 [[package]]
