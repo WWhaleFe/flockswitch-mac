@@ -621,6 +621,14 @@ impl CapsPress {
         Some(key_down)
     }
 }
+/// Without the raw HID observer, a Caps Lock flip seen by the event tap counts as one short press.
+fn caps_fallback_tap(raw_caps: bool, code: u16, old_flags: u64, new_flags: u64) -> bool {
+    const ALPHA_SHIFT: u64 = 0x10000;
+    !raw_caps && code == 57 && (old_flags ^ new_flags) & ALPHA_SHIFT != 0
+}
+static CAPS_WARNED: AtomicBool = AtomicBool::new(false);
+/// True only the first time, so a missing observer is logged once per app run.
+fn first_caps_warning() -> bool { !CAPS_WARNED.swap(true, Ordering::Relaxed) }
 extern "C" {
     fn fs_caps_start(callback: unsafe extern "C" fn(Ref, bool, u64), context: Ref) -> Ref;
     fn fs_caps_stop(handle: Ref);
@@ -642,6 +650,7 @@ struct Capture {
     held: [bool; 8],
     caps: CapsPress,
     caps_times: Arc<Mutex<std::collections::VecDeque<Instant>>>,
+    raw_caps: bool,
     tap: Ref,
 }
 unsafe extern "C" fn capture(_: Ref, kind: u32, event: Ref, user: Ref) -> Ref {
@@ -684,6 +693,11 @@ unsafe extern "C" fn capture(_: Ref, kind: u32, event: Ref, user: Ref) -> Ref {
                 let _ = state.sink.send(ev);
             }
             // Caps Lock is sent by the raw HID observer, independently of these flips.
+            if caps_fallback_tap(state.raw_caps, field(9) as u16, state.flags, flags) {
+                for down in [true, false] {
+                    let _ = state.sink.send(InputEvent::Key { usage: 0x39, down });
+                }
+            }
             state.flags = flags;
             None
         }
@@ -799,6 +813,7 @@ impl Platform for MacPlatform {
                     held: [false; 8],
                     caps: CapsPress::default(),
                     caps_times,
+                    raw_caps: false,
                     tap: null_mut(),
                 });
                 let mask = [1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 22, 25, 26, 27]
@@ -819,15 +834,16 @@ impl Platform for MacPlatform {
                     return;
                 }
                 let caps_handle = fs_caps_start(capture_caps, (&mut *state as *mut Capture).cast());
-                if caps_handle.is_null() {
-                    log::error!("cannot observe raw Caps Lock input");
-                    CFMachPortInvalidate(tap);
-                    CFRelease(source);
-                    CFRelease(tap);
-                    let _ = tx.send(false);
-                    return;
-                }
-                let caps_monitor = CapsMonitor(caps_handle);
+                // The raw observer only adds exact Caps timing; capture works without it.
+                let caps_monitor = if caps_handle.is_null() {
+                    if first_caps_warning() {
+                        log::warn!("cannot observe raw Caps Lock input; Caps Lock is timed from the event tap");
+                    }
+                    None
+                } else {
+                    state.raw_caps = true;
+                    Some(CapsMonitor(caps_handle))
+                };
                 CFRunLoopAddSource(CFRunLoopGetCurrent(), source, kCFRunLoopDefaultMode);
                 CGEventTapEnable(tap, true);
                 CGAssociateMouseAndMouseCursorPosition(0);
@@ -1082,7 +1098,7 @@ mod tests {
         let platform = MacPlatform::default();
         let (sink, input) = mpsc::channel();
         let mut capture = Capture { sink, flags: 0, held: [false; 8], caps: CapsPress::default(),
-            caps_times: platform.caps_times.clone(), tap: null_mut() };
+            caps_times: platform.caps_times.clone(), raw_caps: true, tap: null_mut() };
         let user = (&mut capture as *mut Capture).cast();
         unsafe {
             capture_caps(user, true, 700_000_000);
@@ -1096,6 +1112,23 @@ mod tests {
         let end = platform.captured_at(&up).unwrap();
         assert!(end.duration_since(start) >= Duration::from_millis(700));
         assert!(platform.caps_times.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn caps_fallback_taps_only_without_raw_observer_on_alpha_shift_flip() {
+        assert!(caps_fallback_tap(false, 57, 0, 0x10000));
+        assert!(caps_fallback_tap(false, 57, 0x10000, 0));
+        assert!(!caps_fallback_tap(true, 57, 0, 0x10000));
+        assert!(!caps_fallback_tap(false, 57, 0x10000, 0x10000));
+        assert!(!caps_fallback_tap(false, 56, 0, 0x10000));
+    }
+
+    #[test]
+    fn missing_caps_observer_warns_once_and_has_no_timestamp() {
+        assert!(first_caps_warning());
+        assert!(!first_caps_warning());
+        let platform = MacPlatform::default();
+        assert!(platform.captured_at(&InputEvent::Key { usage: 0x39, down: true }).is_none());
     }
 
     #[test]
