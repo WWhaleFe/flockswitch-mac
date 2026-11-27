@@ -119,6 +119,10 @@ cargo build --release
 packaging/macos/make-app.sh target/release/flockswitch /Applications   # flockswitch.app
 ```
 
+## Before you push
+
+The pre-push hook (`.git/hooks/pre-push`, which calls `scripts/pre-push.sh`) runs what CI runs: the Cargo.lock check, `cargo test --locked` and the netcore tests (CI's release build is left out; CI does not use `-D warnings`). Pushing tags only runs the lock check. In an emergency, `FLOCKSWITCH_SKIP_PREPUSH=1 git push`.
+
 ## License
 
 MIT
