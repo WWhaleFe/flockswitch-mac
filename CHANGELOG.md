@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.1.1 - 2026-11-27
+
+- Fixed: with the Mac as master, it could not cross to a sub. When the helper that times a Caps Lock long press (reading the keyboard device directly) could not open, the whole input capture was cancelled. The helper is now optional; without it Caps Lock works as a short press (Korean/English). With Input Monitoring allowed, the long press works too.
+- When crossing cannot start, it no longer retries every 8 ms: it waits 2 s, up to 30 s, before trying again, and shows the reason.
+- Quitting the app, or the app restarting after an update, closes the settings window too.
+- The flockswitch icon shows in the Dock while the settings window is open.
+- Fixed having to add and switch on Accessibility and Input Monitoring again after every update. When a new version started and the permissions briefly read as off, the app removed its own entries. It no longer resets them by itself (only with the button on the permissions card), restarts go through macOS app launching, and permissions are re-checked for 3 s before deciding. Moving to 2.1.1 may need them switched on once more.
+
 ## 2.1.0 - 2026-11-27
 
 - New settings window: one fixed-size window with a sidebar (Network: Connection and layout, Crossing, Keyboard, Clipboard, This computer; Logitech: Button switching, Shortcut switching, Edge switching, Devices; App: Effects, General) instead of tabs. Pages scroll inside the window, which never changes size; section headers share one height and boxes side by side line up; lime is used only for the "mouse is here" dot and the chosen role. A status card at the foot of the sidebar shows where the mouse is, the network state and the device.

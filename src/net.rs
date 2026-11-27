@@ -165,29 +165,17 @@ pub fn reset_permissions() -> anyhow::Result<()> {
     if !errors.is_empty() { anyhow::bail!("{}", errors.join("\n")); }
     Ok(())
 }
-/// Clears this app's own stale grant for each permission that is missing, once per app
-/// version. After an update with a changed signature, System Settings may still show
-/// flockswitch as allowed while the grant no longer matches; turning that row on and off
-/// does nothing until it is removed. Doing the removal here means the user only has to
-/// switch the fresh row on. Working permissions are left alone.
-fn clear_stale_grants() {
-    let marker = Config::path().with_file_name(format!("permissions-cleared-{}", env!("CARGO_PKG_VERSION")));
-    if marker.exists() { return; }
-    let p = permissions();
-    let mut services = Vec::new();
-    if !p.accessibility { services.push("Accessibility"); }
-    if !p.input_monitoring { services.push("ListenEvent"); }
-    for service in services {
-        match std::process::Command::new("tccutil").args(["reset", service, "io.github.wwhalefe.flockswitch"]).output() {
-            Ok(r) if r.status.success() => log::info!("permissions: cleared the old {service} entry"),
-            Ok(r) => log::warn!("permissions: tccutil {service}: {}", String::from_utf8_lossy(&r.stderr).trim()),
-            Err(e) => log::warn!("permissions: tccutil {service}: {e}"),
-        }
+/// Permissions as they read right after start. Right after an update TCC can take a
+/// moment to match the new copy to its grant, so a missing one is read again for about
+/// three seconds before it counts. Nothing is ever reset automatically.
+fn settled_permissions() -> bool {
+    for _ in 0..30 {
+        if permissions_ready() { return true; }
+        thread::sleep(Duration::from_millis(100));
     }
-    let _ = std::fs::write(marker, b"");
+    permissions_ready()
 }
 fn request_permissions() {
-    clear_stale_grants();
     unsafe {
         if !AXIsProcessTrusted() {
             let options = CFDictionaryCreate(
@@ -379,7 +367,7 @@ pub fn spawn(shared: Arc<Shared>) -> JoinHandle<()> {
             let mut previous: Option<NetConfig> = None;
             let mut prompted = false;
             let mut permission_poll = Instant::now() - Duration::from_secs(2);
-            let mut was_ready = permissions_ready();
+            let mut was_ready = settled_permissions();
             let mut rules_retry = Instant::now() - Duration::from_secs(1);
             let mut retry = Instant::now() - Duration::from_secs(5);
             while !shared.stopped() {
@@ -621,6 +609,14 @@ impl CapsPress {
         Some(key_down)
     }
 }
+/// Without the raw HID observer, a Caps Lock flip seen by the event tap counts as one short press.
+fn caps_fallback_tap(raw_caps: bool, code: u16, old_flags: u64, new_flags: u64) -> bool {
+    const ALPHA_SHIFT: u64 = 0x10000;
+    !raw_caps && code == 57 && (old_flags ^ new_flags) & ALPHA_SHIFT != 0
+}
+static CAPS_WARNED: AtomicBool = AtomicBool::new(false);
+/// True only the first time, so a missing observer is logged once per app run.
+fn first_caps_warning() -> bool { !CAPS_WARNED.swap(true, Ordering::Relaxed) }
 extern "C" {
     fn fs_caps_start(callback: unsafe extern "C" fn(Ref, bool, u64), context: Ref) -> Ref;
     fn fs_caps_stop(handle: Ref);
@@ -642,6 +638,7 @@ struct Capture {
     held: [bool; 8],
     caps: CapsPress,
     caps_times: Arc<Mutex<std::collections::VecDeque<Instant>>>,
+    raw_caps: bool,
     tap: Ref,
 }
 unsafe extern "C" fn capture(_: Ref, kind: u32, event: Ref, user: Ref) -> Ref {
@@ -684,6 +681,11 @@ unsafe extern "C" fn capture(_: Ref, kind: u32, event: Ref, user: Ref) -> Ref {
                 let _ = state.sink.send(ev);
             }
             // Caps Lock is sent by the raw HID observer, independently of these flips.
+            if caps_fallback_tap(state.raw_caps, field(9) as u16, state.flags, flags) {
+                for down in [true, false] {
+                    let _ = state.sink.send(InputEvent::Key { usage: 0x39, down });
+                }
+            }
             state.flags = flags;
             None
         }
@@ -799,6 +801,7 @@ impl Platform for MacPlatform {
                     held: [false; 8],
                     caps: CapsPress::default(),
                     caps_times,
+                    raw_caps: false,
                     tap: null_mut(),
                 });
                 let mask = [1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 22, 25, 26, 27]
@@ -819,15 +822,16 @@ impl Platform for MacPlatform {
                     return;
                 }
                 let caps_handle = fs_caps_start(capture_caps, (&mut *state as *mut Capture).cast());
-                if caps_handle.is_null() {
-                    log::error!("cannot observe raw Caps Lock input");
-                    CFMachPortInvalidate(tap);
-                    CFRelease(source);
-                    CFRelease(tap);
-                    let _ = tx.send(false);
-                    return;
-                }
-                let caps_monitor = CapsMonitor(caps_handle);
+                // The raw observer only adds exact Caps timing; capture works without it.
+                let caps_monitor = if caps_handle.is_null() {
+                    if first_caps_warning() {
+                        log::warn!("cannot observe raw Caps Lock input; Caps Lock is timed from the event tap");
+                    }
+                    None
+                } else {
+                    state.raw_caps = true;
+                    Some(CapsMonitor(caps_handle))
+                };
                 CFRunLoopAddSource(CFRunLoopGetCurrent(), source, kCFRunLoopDefaultMode);
                 CGEventTapEnable(tap, true);
                 CGAssociateMouseAndMouseCursorPosition(0);
@@ -1082,7 +1086,7 @@ mod tests {
         let platform = MacPlatform::default();
         let (sink, input) = mpsc::channel();
         let mut capture = Capture { sink, flags: 0, held: [false; 8], caps: CapsPress::default(),
-            caps_times: platform.caps_times.clone(), tap: null_mut() };
+            caps_times: platform.caps_times.clone(), raw_caps: true, tap: null_mut() };
         let user = (&mut capture as *mut Capture).cast();
         unsafe {
             capture_caps(user, true, 700_000_000);
@@ -1096,6 +1100,23 @@ mod tests {
         let end = platform.captured_at(&up).unwrap();
         assert!(end.duration_since(start) >= Duration::from_millis(700));
         assert!(platform.caps_times.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn caps_fallback_taps_only_without_raw_observer_on_alpha_shift_flip() {
+        assert!(caps_fallback_tap(false, 57, 0, 0x10000));
+        assert!(caps_fallback_tap(false, 57, 0x10000, 0));
+        assert!(!caps_fallback_tap(true, 57, 0, 0x10000));
+        assert!(!caps_fallback_tap(false, 57, 0x10000, 0x10000));
+        assert!(!caps_fallback_tap(false, 56, 0, 0x10000));
+    }
+
+    #[test]
+    fn missing_caps_observer_warns_once_and_has_no_timestamp() {
+        assert!(first_caps_warning());
+        assert!(!first_caps_warning());
+        let platform = MacPlatform::default();
+        assert!(platform.captured_at(&InputEvent::Key { usage: 0x39, down: true }).is_none());
     }
 
     #[test]
@@ -1240,13 +1261,8 @@ pub fn launch_background() -> anyhow::Result<()> {
     launch_tray()
 }
 fn launch_tray() -> anyhow::Result<()> {
-    let exe = std::env::current_exe()?;
-    if let Some(bundle) = exe.ancestors().find(|p| p.extension().is_some_and(|e| e == "app")) {
-        // Starting asynchronously lets this process release the single-instance lock first.
-        std::process::Command::new("open").arg("-n").arg(bundle).args(["--args", "recover-tray"]).spawn()?;
-    } else {
-        std::process::Command::new(exe).arg("recover-tray").spawn()?;
-    }
+    // Starting asynchronously lets this process release the single-instance lock first.
+    crate::update::spawn_self(&["recover-tray"], false)?;
     Ok(())
 }
 

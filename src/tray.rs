@@ -116,6 +116,8 @@ pub fn run(shared: Arc<Shared>) -> Result<()> {
         let destroyed = matches!(event, Event::LoopDestroyed);
         if shared.stopped() || destroyed {
             shared.request_stop();
+            // An open settings window has nothing left to talk to: close it.
+            crate::settings_ui::tell_settings_to_quit();
             if let Some(h) = network.take() {
                 let _ = h.join();
             }
@@ -419,7 +421,7 @@ fn spawn_replacement_watch(shared: Arc<Shared>) {
             }
             log::info!("a new version has replaced this app; starting it");
             std::thread::sleep(REPLACEMENT_SETTLE);
-            if let Err(e) = std::process::Command::new("/usr/bin/open").args(["-g", "-n"]).arg(&bundle).status() {
+            if let Err(e) = crate::update::spawn_self(&[], true).and_then(|mut c| c.wait()) {
                 log::warn!("cannot start the new version: {e}");
             }
             return;
@@ -429,12 +431,7 @@ fn spawn_replacement_watch(shared: Arc<Shared>) {
 
 /// Starts the settings window as a separate process of this same program.
 pub fn open_settings_window() {
-    match std::env::current_exe() {
-        Ok(exe) => {
-            if let Err(e) = std::process::Command::new(exe).arg("settings").spawn() {
-                log::warn!("cannot open the settings window: {e}");
-            }
-        }
-        Err(e) => log::warn!("cannot open the settings window: {e}"),
+    if let Err(e) = crate::update::spawn_self(&["settings"], false) {
+        log::warn!("cannot open the settings window: {e}");
     }
 }
