@@ -146,6 +146,33 @@ pub fn permissions() -> flock_net::Permissions {
     // kIOHIDRequestTypeListenEvent = 1, kIOHIDAccessTypeGranted = 0.
     unsafe { flock_net::Permissions { accessibility: AXIsProcessTrusted(), input_monitoring: IOHIDCheckAccess(1) == 0 } }
 }
+/// How often the background copy of the permissions is read again.
+const PERMISSION_REFRESH: Duration = Duration::from_secs(1);
+static PERMISSION_COPY: Mutex<Option<flock_net::Permissions>> = Mutex::new(None);
+/// The network service asks for the permissions on every pass of its loop, every 8 ms
+/// while this Mac controls another computer. Asking TCC takes about 8 ms a time and up
+/// to 30 ms, which held back the mouse motion sent to the other computer in uneven
+/// bursts, so the service reads a copy that a background thread refreshes every second.
+fn cached_permissions() -> flock_net::Permissions {
+    if let Some(p) = *PERMISSION_COPY.lock().unwrap() {
+        return p;
+    }
+    let fresh = permissions();
+    let mut copy = PERMISSION_COPY.lock().unwrap();
+    if copy.is_none() {
+        *copy = Some(fresh);
+        let spawned = thread::Builder::new().name("permission-copy".into()).spawn(|| loop {
+            thread::sleep(PERMISSION_REFRESH);
+            let p = permissions();
+            *PERMISSION_COPY.lock().unwrap() = Some(p);
+        });
+        if spawned.is_err() {
+            // Without the refresher, read TCC directly as before.
+            *copy = None;
+        }
+    }
+    fresh
+}
 pub fn reported_permissions() -> Option<flock_net::Permissions> {
     let bytes = std::fs::read(flock_net::status_path(config_dir())).ok()?;
     let status: Value = serde_json::from_slice(&bytes).ok()?;
@@ -775,9 +802,10 @@ impl Platform for MacPlatform {
     fn received_dir(&self) -> Option<PathBuf> {
         received_dir()
     }
-    fn permissions(&self) -> Option<flock_net::Permissions> { Some(permissions()) }
+    fn permissions(&self) -> Option<flock_net::Permissions> { Some(cached_permissions()) }
     fn ready(&self) -> Result<(), String> {
-        if permissions_ready() {
+        let p = cached_permissions();
+        if p.accessibility && p.input_monitoring {
             Ok(())
         } else {
             Err(PERMISSION_ERROR.into())
