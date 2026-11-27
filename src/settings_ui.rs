@@ -851,18 +851,18 @@ impl eframe::App for SettingsApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.stop_recording();
         if REOPEN.load(Ordering::SeqCst) {
-            match std::env::current_exe() {
-                Ok(exe) => {
-                    log::info!("update: opening the settings window again from the new version");
-                    let spawned = std::process::Command::new("/bin/sh")
-                        .args(["-c", "sleep 2; exec \"$0\" settings update"])
-                        .arg(exe)
-                        .spawn();
-                    if let Err(e) = spawned {
-                        log::warn!("cannot open the settings window again: {e}");
-                    }
-                }
-                Err(e) => log::warn!("cannot open the settings window again: {e}"),
+            log::info!("update: opening the settings window again from the new version");
+            let exe = std::env::current_exe().map(|e| std::fs::canonicalize(&e).unwrap_or(e));
+            let spawned = exe.and_then(|exe| {
+                let (program, args) = crate::update::self_launch_command(&exe, &["settings", "update"], false);
+                std::process::Command::new("/bin/sh")
+                    .args(["-c", "sleep 2; exec \"$@\"", "sh"])
+                    .arg(program)
+                    .args(args)
+                    .spawn()
+            });
+            if let Err(e) = spawned {
+                log::warn!("cannot open the settings window again: {e}");
             }
         }
     }

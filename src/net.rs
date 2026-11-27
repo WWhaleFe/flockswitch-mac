@@ -165,29 +165,17 @@ pub fn reset_permissions() -> anyhow::Result<()> {
     if !errors.is_empty() { anyhow::bail!("{}", errors.join("\n")); }
     Ok(())
 }
-/// Clears this app's own stale grant for each permission that is missing, once per app
-/// version. After an update with a changed signature, System Settings may still show
-/// flockswitch as allowed while the grant no longer matches; turning that row on and off
-/// does nothing until it is removed. Doing the removal here means the user only has to
-/// switch the fresh row on. Working permissions are left alone.
-fn clear_stale_grants() {
-    let marker = Config::path().with_file_name(format!("permissions-cleared-{}", env!("CARGO_PKG_VERSION")));
-    if marker.exists() { return; }
-    let p = permissions();
-    let mut services = Vec::new();
-    if !p.accessibility { services.push("Accessibility"); }
-    if !p.input_monitoring { services.push("ListenEvent"); }
-    for service in services {
-        match std::process::Command::new("tccutil").args(["reset", service, "io.github.wwhalefe.flockswitch"]).output() {
-            Ok(r) if r.status.success() => log::info!("permissions: cleared the old {service} entry"),
-            Ok(r) => log::warn!("permissions: tccutil {service}: {}", String::from_utf8_lossy(&r.stderr).trim()),
-            Err(e) => log::warn!("permissions: tccutil {service}: {e}"),
-        }
+/// Permissions as they read right after start. Right after an update TCC can take a
+/// moment to match the new copy to its grant, so a missing one is read again for about
+/// three seconds before it counts. Nothing is ever reset automatically.
+fn settled_permissions() -> bool {
+    for _ in 0..30 {
+        if permissions_ready() { return true; }
+        thread::sleep(Duration::from_millis(100));
     }
-    let _ = std::fs::write(marker, b"");
+    permissions_ready()
 }
 fn request_permissions() {
-    clear_stale_grants();
     unsafe {
         if !AXIsProcessTrusted() {
             let options = CFDictionaryCreate(
@@ -379,7 +367,7 @@ pub fn spawn(shared: Arc<Shared>) -> JoinHandle<()> {
             let mut previous: Option<NetConfig> = None;
             let mut prompted = false;
             let mut permission_poll = Instant::now() - Duration::from_secs(2);
-            let mut was_ready = permissions_ready();
+            let mut was_ready = settled_permissions();
             let mut rules_retry = Instant::now() - Duration::from_secs(1);
             let mut retry = Instant::now() - Duration::from_secs(5);
             while !shared.stopped() {
@@ -1273,13 +1261,8 @@ pub fn launch_background() -> anyhow::Result<()> {
     launch_tray()
 }
 fn launch_tray() -> anyhow::Result<()> {
-    let exe = std::env::current_exe()?;
-    if let Some(bundle) = exe.ancestors().find(|p| p.extension().is_some_and(|e| e == "app")) {
-        // Starting asynchronously lets this process release the single-instance lock first.
-        std::process::Command::new("open").arg("-n").arg(bundle).args(["--args", "recover-tray"]).spawn()?;
-    } else {
-        std::process::Command::new(exe).arg("recover-tray").spawn()?;
-    }
+    // Starting asynchronously lets this process release the single-instance lock first.
+    crate::update::spawn_self(&["recover-tray"], false)?;
     Ok(())
 }
 

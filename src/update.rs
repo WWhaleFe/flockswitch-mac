@@ -504,6 +504,35 @@ pub fn bundle_of(exe: &Path) -> Option<PathBuf> {
     (macos.ends_with("Contents/MacOS") && bundle.extension().is_some_and(|e| e == "app")).then(|| bundle.to_path_buf())
 }
 
+/// The program and arguments that start a copy of this app. Inside a .app bundle that is
+/// `open -n`, so LaunchServices starts it as its own process and macOS checks its
+/// permissions against it, not against the process that started it. Outside a bundle
+/// (cargo run) the program is run directly.
+pub fn self_launch_command(exe: &Path, args: &[&str], background: bool) -> (PathBuf, Vec<std::ffi::OsString>) {
+    match bundle_of(exe) {
+        Some(bundle) => {
+            let mut a: Vec<std::ffi::OsString> = vec![];
+            if background { a.push("-g".into()); }
+            a.push("-n".into());
+            a.push(bundle.into_os_string());
+            if !args.is_empty() {
+                a.push("--args".into());
+                a.extend(args.iter().map(std::ffi::OsString::from));
+            }
+            (PathBuf::from("/usr/bin/open"), a)
+        }
+        None => (exe.to_path_buf(), args.iter().map(std::ffi::OsString::from).collect()),
+    }
+}
+
+/// Starts another copy of this app (see `self_launch_command`) without waiting for it.
+pub fn spawn_self(args: &[&str], background: bool) -> std::io::Result<std::process::Child> {
+    let exe = std::env::current_exe()?;
+    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+    let (program, a) = self_launch_command(&exe, args, background);
+    Command::new(program).args(a).spawn()
+}
+
 /// The version an Info.plist states.
 pub fn plist_version(text: &str) -> Option<&str> {
     let (_, rest) = text.split_once("<key>CFBundleShortVersionString</key>")?;
@@ -566,6 +595,32 @@ fn percent_encode(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn bundle_is_found_only_for_an_app_executable() {
+        let exe = Path::new("/Applications/flockswitch.app/Contents/MacOS/flockswitch");
+        assert_eq!(bundle_of(exe), Some(PathBuf::from("/Applications/flockswitch.app")));
+        assert_eq!(bundle_of(Path::new("/tmp/target/debug/flockswitch")), None);
+        assert_eq!(bundle_of(Path::new("/tmp/x/Contents/MacOS/flockswitch")), None);
+    }
+
+    #[test]
+    fn relaunch_goes_through_launch_services_in_a_bundle() {
+        let exe = Path::new("/Applications/flockswitch.app/Contents/MacOS/flockswitch");
+        let (p, a) = self_launch_command(exe, &["settings", "update"], false);
+        assert_eq!(p, PathBuf::from("/usr/bin/open"));
+        assert_eq!(a, ["-n", "/Applications/flockswitch.app", "--args", "settings", "update"]);
+        let (_, a) = self_launch_command(exe, &[], true);
+        assert_eq!(a, ["-g", "-n", "/Applications/flockswitch.app"]);
+    }
+
+    #[test]
+    fn relaunch_runs_the_program_directly_outside_a_bundle() {
+        let exe = Path::new("/tmp/target/debug/flockswitch");
+        let (p, a) = self_launch_command(exe, &["settings"], false);
+        assert_eq!(p, PathBuf::from(exe));
+        assert_eq!(a, ["settings"]);
+    }
+
     use super::*;
 
     #[test]
