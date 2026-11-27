@@ -446,6 +446,10 @@ pub struct PeerConfig {
     /// refused (Bye "paused"), never a crossing target. It stays paired and keeps its cells.
     #[serde(default)]
     pub paused: bool,
+    /// Master only: the peer's monitors as it last told them (2.4), so its tiles keep their
+    /// arrangement while it is away. Empty: not known.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub displays: Vec<Rect>,
 }
 impl Default for PeerConfig {
     fn default() -> Self {
@@ -461,6 +465,7 @@ impl Default for PeerConfig {
             can_send: true,
             via_master: false,
             paused: false,
+            displays: Vec::new(),
         }
     }
 }
