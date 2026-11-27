@@ -970,10 +970,10 @@ impl Platform for MacPlatform {
                     CGEventCreateScrollWheelEvent2(null_mut(), 0, 2, py, px, 0)
                 }
                 InputEvent::Key { usage, down } => {
-                    // While controlled, a Caps Lock tap is the Korean/English toggle (what the
+                    // While controlled, a Lang1 tap is the Korean/English toggle (what a 2.2
                     // controller's rule sends for a Mac): switch the input source directly and
-                    // drop the key up. A real Caps Lock from the controller toggles it too.
-                    if usage == 0x39 {
+                    // drop the key up. Caps Lock (0x39) is a normal Caps Lock key.
+                    if usage == 0x90 {
                         if down {
                             fs_input_source_toggle();
                         }

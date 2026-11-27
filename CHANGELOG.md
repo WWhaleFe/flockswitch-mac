@@ -7,7 +7,8 @@
 - Pause connection: each paired computer has a "Pause connection" switch next to Unpair. A paused computer stays paired and keeps its place, is not connected or crossed to, and is shown as "Paused" and dimmed in the list and on the map.
 - Keyboard page: a compatibility guide (short note and details) on what is mapped between Mac, Windows, Linux and Android and what is not.
 - Korean/English in all pairs, with Shift+Space as a key on every sender by default. Saved rules get Shift+Space once (a user who turns it off keeps it off).
-- A controlled Mac switches the input source directly (Korean and the previous Latin source) when the other computer sends the Korean/English toggle (a Caps Lock tap), instead of replaying Caps Lock. A real Caps Lock from the other computer toggles the language too.
+- A controlled Mac switches the input source directly (Korean and the previous Latin source) when the other computer sends the Korean/English toggle, which a 2.2 sender now sends to a Mac as a Lang1 key instead of a Caps Lock tap. A real Caps Lock from the other computer stays a real Caps Lock. A sender older than 2.2 still sends a Caps Lock tap, which a Mac receives as Caps Lock.
+- Shift+Space is now a Korean/English key on every sender, so Shift held while pressing Space sends the toggle instead of a space (it can be turned off in the Keyboard page mapping).
 - Reconnecting fixes (see the network core): more reliable reconnection to a Mac on the same network.
 - Fixed: moving the mouse to a Linux computer could stutter; fixed in the macOS permission check cache.
 
