@@ -4,6 +4,8 @@
 mod backup;
 mod ble;
 mod config;
+mod file_io;
+mod key_rules;
 mod device;
 mod edge;
 mod engine;
@@ -13,7 +15,9 @@ mod i18n;
 mod net;
 mod icon;
 mod overlay;
+mod settings_logic;
 mod settings_ui;
+mod wake;
 mod shared;
 mod tray;
 mod update;
@@ -23,7 +27,6 @@ use config::Config;
 use engine::Engine;
 use shared::Shared;
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 const USAGE: &str = "\
@@ -123,10 +126,16 @@ fn main() {
     } else {
         None
     };
-    Config::migrate_old_name();
+    // Screenshot mode (FLOCKSWITCH_SHOTS) never touches the real settings folder.
+    let shots = args.first().map(String::as_str) == Some("settings") && settings_ui::shots_dir().is_some();
+    if !shots {
+        Config::migrate_old_name();
+    }
     // The settings window has no console when started from the menu: log to its own
     // file so a window that fails to open (graphics drivers) leaves a trace.
-    let log_file = if tray_mode {
+    let log_file = if shots {
+        None
+    } else if tray_mode {
         Some(log_path())
     } else if args.first().map(String::as_str) == Some("settings") {
         Some(log_path().with_file_name("settings.log"))
@@ -156,7 +165,8 @@ fn real_main(args: &[String]) -> Result<()> {
         "settings" => {
             // One settings window at a time. Opening it again knocks on the open
             // window's port (nothing is sent), which brings that window to the front.
-            let addr = std::net::SocketAddr::from(([127, 0, 0, 1], INSTANCE_PORT + 1));
+            let port = if settings_ui::shots_dir().is_some() { 0 } else { INSTANCE_PORT + 1 };
+            let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
             let Some(lock) = std::net::TcpListener::bind(addr).ok() else {
                 let _ = std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(1));
                 return Ok(());
@@ -210,9 +220,7 @@ fn real_main(args: &[String]) -> Result<()> {
             let (Some(key), Some(value)) = (args.get(1), args.get(2)) else {
                 bail!("usage: flockswitch set <key> <value>  (see 'flockswitch help')");
             };
-            let mut cfg = Config::load_or_create()?;
-            cfg.set(key, value)?;
-            cfg.save()?;
+            Config::update(|cfg| cfg.set(key, value))?;
             println!("{key} = {value}  ({})", Config::path().display());
             Ok(())
         }
@@ -231,11 +239,11 @@ fn run_headless() -> Result<()> {
     }
     let shared = Arc::new(Shared::new(cfg));
     let s = shared.clone();
-    ctrlc::set_handler(move || s.stop.store(true, Ordering::SeqCst))?;
+    ctrlc::set_handler(move || s.request_stop())?;
     edge::spawn(shared.clone());
     let network = net::spawn(shared.clone());
     let result = Engine::new(shared.clone()).and_then(|mut engine| engine.run());
-    shared.stop.store(true, Ordering::SeqCst);
+    shared.request_stop();
     let _ = network.join();
     result
 }
@@ -289,10 +297,10 @@ fn load_config() -> Config {
             let path = Config::path();
             let backup = path.with_file_name("config.invalid.toml");
             log::warn!("{e:#}; using defaults (your file is kept as {})", backup.display());
-            let _ = std::fs::rename(&path, &backup);
-            let cfg = Config::default();
-            let _ = cfg.save();
-            cfg
+            Config::recover_invalid().unwrap_or_else(|e| {
+                log::warn!("cannot recover settings: {e:#}");
+                Config::default()
+            })
         }
     }
 }
@@ -369,12 +377,15 @@ pub fn uninstall() {
         }
     }
     if let Some(dir) = Config::path().parent() {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for e in entries.flatten() {
-                let _ = std::fs::remove_file(e.path());
+        // The folder is flockswitch's own: it holds the network key (net/identity.der)
+        // and the clipboard transfer work folders as well as the files.
+        if dir.file_name().is_some_and(|n| n == "flockswitch") {
+            if let Err(e) = std::fs::remove_dir_all(dir) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    log::warn!("could not remove {}: {e}", dir.display());
+                }
             }
         }
-        let _ = std::fs::remove_dir(dir);
     }
     log::info!("uninstalled settings and start-at-login");
 }

@@ -99,7 +99,10 @@ fn export_in(dir: &Path, cfg: &Config, host: &str, now: SystemTime) -> Result<Pa
 
 /// The file's content: a comment naming the app, system and version, then the settings.
 pub fn export_text(cfg: &Config, host: &str, at: SystemTime) -> Result<String> {
-    let body = toml::to_string_pretty(cfg)?;
+    // The pairing state belongs to this computer.
+    let mut own = cfg.clone();
+    keep_device_network(&mut own, &Config::default());
+    let body = toml::to_string_pretty(&own)?;
     Ok(format!(
         "# flockswitch settings\n\
          # Saved by flockswitch {} on {} ({}) at {}.\n\
@@ -110,6 +113,28 @@ pub fn export_text(cfg: &Config, host: &str, at: SystemTime) -> Result<String> {
         host,
         format_time(at, true),
     ))
+}
+
+/// Puts `from`'s device-specific network state into `cfg`: paired computers, layout,
+/// role, on/off and the accepted notice only make sense with this computer's identity.
+fn keep_device_network(cfg: &mut Config, from: &Config) {
+    let (n, f) = (&mut cfg.network, &from.network);
+    n.peers = f.peers.clone();
+    n.layout = f.layout.clone();
+    n.role = f.role;
+    n.on = f.on;
+    n.notice_accepted = f.notice_accepted;
+}
+
+/// The settings to run after loading `loaded` on this computer (`current`): the network
+/// state of this computer is kept.
+pub fn restore(current: &Config, loaded: Config) -> Config {
+    let mut next = loaded;
+    keep_device_network(&mut next, current);
+    // This computer's name and port stay too; the file may carry them (export writes them).
+    next.network.name = current.network.name.clone();
+    next.network.port = current.network.port;
+    next
 }
 
 /// "flockswitch-settings-<host>-<YYYYMMDD-HHMMSS>".
@@ -323,6 +348,32 @@ fn local_time(at: SystemTime) -> [i64; 6] {
 mod tests {
     use super::*;
     use crate::config::{ShakeKey, BUTTON_GESTURE};
+
+    #[test]
+    fn pairing_state_stays_on_this_computer() {
+        let mut cfg = Config::default();
+        cfg.network.on = true;
+        cfg.network.notice_accepted = true;
+        cfg.network.role = flock_net::Role::Sub;
+        cfg.network.name = "desk".into();
+        cfg.network.peers.push(flock_net::PeerConfig::default());
+        cfg.network.layout.push(flock_net::layout::Cell { id: "abc123".into(), col: 1, row: 1 });
+        let text = export_text(&cfg, "desk", SystemTime::now()).unwrap();
+        let loaded = from_text(&text).unwrap();
+        assert!(loaded.network.peers.is_empty() && loaded.network.layout.is_empty());
+        assert!(!loaded.network.on && !loaded.network.notice_accepted);
+        assert_eq!(loaded.network.role, flock_net::Role::Master);
+        assert_eq!(loaded.network.name, "desk");
+        let mut other = Config::default();
+        other.network.on = true;
+        other.network.peers.push(flock_net::PeerConfig::default());
+        other.network.name = "mine".into();
+        other.network.port = 47199;
+        let next = restore(&other, loaded);
+        assert!(next.network.on && next.network.peers.len() == 1);
+        assert_eq!(next.network.name, "mine");
+        assert_eq!(next.network.port, 47199);
+    }
 
     #[test]
     fn export_and_import_round_trip() {

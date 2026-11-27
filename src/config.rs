@@ -986,9 +986,7 @@ impl Config {
             if old.join("net").is_dir() { copy_tree(&old.join("net"), &dest.join("net"))?; }
             if let Some(network) = source.get("network") {
                 table.insert("network".into(), network.clone());
-                let temporary = dest.join("config-migration.tmp");
-                std::fs::write(&temporary, toml::to_string_pretty(&table)?)?;
-                std::fs::rename(temporary, &path)?;
+                crate::file_io::atomic_write(&path, toml::to_string_pretty(&table)?.as_bytes())?;
             }
         }
         std::fs::write(marker, b"")?;
@@ -998,17 +996,21 @@ impl Config {
     /// Loads the config, writing the defaults on first run so users have a file to edit.
     pub fn load_or_create() -> Result<Config> {
         let path = Self::path();
-        // A failed import of test-build networking must never cost the user's own
-        // settings: it is logged, left unmarked and tried again at the next start.
-        if let Err(e) = Self::migrate_test_network(&Self::base_dir()) {
-            log::warn!("migrating test-build network settings: {e:#}");
-        }
+        crate::file_io::with_lock(&path, || {
+            if let Err(e) = Self::migrate_test_network(&Self::base_dir()) {
+                log::warn!("migrating test-build network settings: {e:#}");
+            }
+            Self::load_at(&path)
+        })
+    }
+
+    fn load_at(path: &std::path::Path) -> Result<Config> {
         if !path.exists() {
             let cfg = Config::default();
-            cfg.save()?;
+            cfg.save_at(path)?;
             return Ok(cfg);
         }
-        let text = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let cfg = Config::parse(&text).with_context(|| format!("parsing {}", path.display()))?;
         cfg.validate()?;
         Ok(cfg)
@@ -1076,13 +1078,50 @@ impl Config {
         Ok(cfg)
     }
 
+    /// Recheck under the same lock before moving an invalid file aside. Another
+    /// process may already have repaired it after the first load failed.
+    pub fn recover_invalid() -> Result<Config> {
+        Self::recover_invalid_at(&Self::path())
+    }
+
+    fn recover_invalid_at(path: &std::path::Path) -> Result<Config> {
+        crate::file_io::with_lock(path, || {
+            if let Ok(cfg) = Self::load_at(path) { return Ok(cfg); }
+            let backup = path.with_file_name("config.invalid.toml");
+            std::fs::rename(path, backup)?;
+            let cfg = Config::default();
+            cfg.save_at(path)?;
+            Ok(cfg)
+        })
+    }
+
+    #[cfg(test)]
     pub fn save(&self) -> Result<()> {
         let path = Self::path();
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(&path, toml::to_string_pretty(self)?)?;
+        crate::file_io::with_lock(&path, || self.save_at(&path))
+    }
+
+    fn save_at(&self, path: &std::path::Path) -> Result<()> {
+        if let Some(dir) = path.parent() { std::fs::create_dir_all(dir)?; }
+        crate::file_io::atomic_write(path, toml::to_string_pretty(self)?.as_bytes())?;
         Ok(())
+    }
+
+    pub fn update(change: impl FnOnce(&mut Config) -> Result<()>) -> Result<Config> {
+        Self::load_or_create()?;
+        Self::update_at(&Self::path(), change)
+    }
+
+    fn update_at(path: &std::path::Path, change: impl FnOnce(&mut Config) -> Result<()>) -> Result<Config> {
+        crate::file_io::with_lock(path, || {
+            let current = Self::load_at(path)?;
+            let mut next = current.clone();
+            change(&mut next)?;
+            next.resolve_edge_owner(&current);
+            next.validate()?;
+            if toml::to_string(&next)? != toml::to_string(&current)? { next.save_at(path)?; }
+            Ok(next)
+        })
     }
 
     /// The setting of a trigger button (`cid` must be one of `BUTTONS`).
@@ -2180,5 +2219,61 @@ mod test_build_migration_tests {
         fs::write(f.source().join("config.toml"), "[network]\nname = 'Imported'\n").unwrap();
         Config::migrate_test_network(&f.0).unwrap();
         assert_eq!(Config::parse(&fs::read_to_string(f.dest().join("config.toml")).unwrap()).unwrap().network.name, "Imported");
+    }
+}
+
+#[cfg(test)]
+mod transaction_tests {
+    use super::*;
+
+    #[test]
+    fn config_writer_child() {
+        let Some(path) = std::env::var_os("FLOCK_CONFIG_TRANSACTION_TEST") else { return };
+        for _ in 0..20 {
+            Config::update_at(std::path::Path::new(&path), |c| {
+                let n: usize = c.network.name.parse().unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                c.network.name = (n + 1).to_string();
+                Ok(())
+            }).unwrap();
+        }
+    }
+
+    #[test]
+    fn recovery_does_not_replace_a_file_repaired_by_another_process() {
+        let dir = std::env::temp_dir().join(format!("flock-config-recovery-{}", std::process::id()));
+        let path = dir.join("config.toml");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, "broken = [").unwrap();
+        assert!(Config::load_at(&path).is_err());
+        Config::default().save_at(&path).unwrap();
+        Config::update_at(&path, |c| { c.network.name = "repaired".into(); Ok(()) }).unwrap();
+        assert_eq!(Config::recover_invalid_at(&path).unwrap().network.name, "repaired");
+        assert!(!dir.join("config.invalid.toml").exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn concurrent_processes_preserve_all_config_changes() {
+        let dir = std::env::temp_dir().join(format!("flock-config-transaction-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let mut cfg = Config::default();
+        cfg.network.name = "0".into();
+        cfg.save_at(&path).unwrap();
+        let mut children = Vec::new();
+        for _ in 0..4 {
+            children.push(std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "config::transaction_tests::config_writer_child"])
+                .env("FLOCK_CONFIG_TRANSACTION_TEST", &path)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null()).spawn().unwrap());
+        }
+        let statuses: Vec<_> = children.iter_mut().map(|c| c.wait().unwrap()).collect();
+        let success = statuses.iter().all(|s| s.success());
+        let final_config = Config::load_at(&path);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(success, "concurrent writer failed to read a complete config");
+        assert_eq!(final_config.unwrap().network.name, "80");
     }
 }

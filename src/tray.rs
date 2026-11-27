@@ -43,7 +43,7 @@ struct Ui {
 pub fn run(shared: Arc<Shared>) -> Result<()> {
     // Ctrl+C, logout or shutdown: let the loop below hand the button back and exit.
     let s = shared.clone();
-    ctrlc::set_handler(move || s.stop.store(true, std::sync::atomic::Ordering::SeqCst))?;
+    ctrlc::set_handler(move || s.request_stop())?;
     let engine = spawn_engine(shared.clone());
     spawn_update_check(shared.clone());
     spawn_replacement_watch(shared.clone());
@@ -73,6 +73,7 @@ pub fn run(shared: Arc<Shared>) -> Result<()> {
         // The tray icon must be created once the event loop is running (macOS).
         if let Event::NewEvents(StartCause::Init) = event {
             crate::overlay::set_ready();
+            crate::wake::start();
             match ui.create_tray() {
                 Ok(()) => {}
                 Err(e) => {
@@ -95,7 +96,7 @@ pub fn run(shared: Arc<Shared>) -> Result<()> {
         while let Ok(ev) = MenuEvent::receiver().try_recv() {
             if let Some(action) = ui.actions.get(&ev.id).cloned() {
                 if ui.handle(action) {
-                    shared.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                    shared.request_stop();
                 }
             }
         }
@@ -105,16 +106,16 @@ pub fn run(shared: Arc<Shared>) -> Result<()> {
         if request.exists() {
             let _ = std::fs::remove_file(&request);
             ui.uninstall_requested = true;
-            shared.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            shared.request_stop();
         }
         let request = crate::shared::quit_request_path();
         if request.exists() {
             let _ = std::fs::remove_file(&request);
-            shared.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            shared.request_stop();
         }
         let destroyed = matches!(event, Event::LoopDestroyed);
         if shared.stopped() || destroyed {
-            shared.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            shared.request_stop();
             if let Some(h) = network.take() {
                 let _ = h.join();
             }
@@ -381,10 +382,11 @@ fn spawn_update_check(shared: Arc<Shared>) {
         loop {
             let until = Instant::now() + wait;
             while Instant::now() < until {
+                let revision = shared.wake_revision();
                 if shared.stopped() {
                     return;
                 }
-                std::thread::sleep(Duration::from_secs(1));
+                shared.wait_for_change(revision, until.saturating_duration_since(Instant::now()));
             }
             wait = crate::update::CHECK_INTERVAL;
             // Leave a download or install in progress or done alone.

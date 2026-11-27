@@ -5,7 +5,8 @@ use crate::device::Reporting;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
+use std::time::Duration;
 
 /// A device seen at least once, remembered on disk so settings can list it even while
 /// it is connected to another computer.
@@ -65,6 +66,10 @@ pub struct StatusFile {
     /// This computer's channel (1-based), for the 이동할 채널 rows.
     #[serde(default)]
     pub channel: Option<u8>,
+    /// A newer version the menu-bar app has found (its number), so that the settings
+    /// window offers "Update now" at once.
+    #[serde(default)]
+    pub update_available: Option<String>,
 }
 
 fn status_path() -> std::path::PathBuf {
@@ -274,7 +279,9 @@ pub struct Shared {
     version: AtomicU64,
     status: Mutex<Status>,
     last_status_file: Mutex<StatusFile>,
-    pub stop: AtomicBool,
+    stop: AtomicBool,
+    wake_revision: Mutex<u64>,
+    wake: Condvar,
     /// Channel asked for by a keyboard shortcut, for the engine to act on (0 = none).
     switch_request: AtomicU8,
     /// Haptic waveform the edge watcher asks the engine to play on the mouse (+1; 0 = none).
@@ -293,6 +300,8 @@ impl Shared {
             status: Mutex::new(Status::default()),
             last_status_file: Mutex::new(StatusFile { online: vec!["-".into()], ..StatusFile::default() }),
             stop: AtomicBool::new(false),
+            wake_revision: Mutex::new(0),
+            wake: Condvar::new(),
             switch_request: AtomicU8::new(0),
             haptic_request: AtomicU8::new(0),
             locate_request: AtomicBool::new(false),
@@ -310,16 +319,18 @@ impl Shared {
     /// Applies a change, validates it, saves it, and tells the engine. On error nothing
     /// changes, so the UI can simply redraw from the current config.
     pub fn update_config(&self, change: impl FnOnce(&mut Config)) -> Result<()> {
+        self.try_update_config(|next| { change(next); Ok(()) })
+    }
+
+    pub fn try_update_config(&self, change: impl FnOnce(&mut Config) -> Result<()>) -> Result<()> {
         let mut current = self.config.lock().unwrap();
-        let mut next = current.clone();
-        change(&mut next);
-        next.resolve_edge_owner(&current);
-        next.validate()?;
-        next.save()?;
+        let next = Config::update(change)?;
         crate::i18n::set_language(&next.language);
         *current = next;
-        *self.config_mtime.lock().unwrap() = config_mtime();
+        // Force one fresh read: another process may have saved just after our transaction.
+        *self.config_mtime.lock().unwrap() = None;
         self.version.fetch_add(1, Ordering::SeqCst);
+        self.notify_change();
         Ok(())
     }
 
@@ -330,29 +341,18 @@ impl Shared {
         if now.is_none() || now == *self.config_mtime.lock().unwrap() {
             return;
         }
-        // Read and parse without holding any lock.
-        let parsed = std::fs::read_to_string(Config::path())
-            .map_err(anyhow::Error::from)
-            .and_then(|t| Config::parse(&t))
-            .and_then(|c| c.validate().map(|_| c));
-        // Lock order: config, then config_mtime - the same as update_config.
+        // Lock order: memory config, then its mtime, then the file transaction.
         let mut current = self.config.lock().unwrap();
         let mut seen = self.config_mtime.lock().unwrap();
-        if now == *seen {
-            return; // our own save raced with this check
-        }
+        if now == *seen { return; }
+        let parsed = Config::update(|cfg| { cfg.resolve_edge_owner(&current); Ok(()) });
         *seen = now;
         match parsed {
-            Ok(mut cfg) => {
-                let edges_on = cfg.edges.on;
-                cfg.resolve_edge_owner(&current);
-                if cfg.edges.on != edges_on {
-                    if let Err(e) = cfg.save() { log::warn!("save edge ownership: {e:#}"); }
-                    *seen = config_mtime();
-                }
+            Ok(cfg) => {
                 crate::i18n::set_language(&cfg.language);
                 *current = cfg;
                 self.version.fetch_add(1, Ordering::SeqCst);
+                self.notify_change();
                 log::info!("settings file changed, reloaded");
             }
             Err(e) => log::warn!("settings file has an error, keeping current settings: {e:#}"),
@@ -375,6 +375,10 @@ impl Shared {
             hotkeys_failed: st.hotkeys_failed.clone(),
             channel: st.channel,
             version: env!("CARGO_PKG_VERSION").into(),
+            update_available: match &st.update {
+                crate::update::UpdateState::Available(r) | crate::update::UpdateState::UpdateFailed(r, _) => Some(r.version.clone()),
+                _ => None,
+            },
         };
         drop(st);
         // Only touch the disk when something the settings window shows has changed.
@@ -382,6 +386,7 @@ impl Shared {
         if *last != file {
             save_status_file(&file);
             *last = file;
+            self.notify_change();
         }
     }
 
@@ -406,10 +411,32 @@ impl Shared {
     /// The locate shortcut was pressed: the screen watcher shows the cursor.
     pub fn request_locate(&self) {
         self.locate_request.store(true, Ordering::SeqCst);
+        self.notify_change();
     }
 
     pub fn take_locate_request(&self) -> bool {
         self.locate_request.swap(false, Ordering::SeqCst)
+    }
+
+    pub fn wake_revision(&self) -> u64 {
+        *self.wake_revision.lock().unwrap()
+    }
+
+    fn notify_change(&self) {
+        let mut revision = self.wake_revision.lock().unwrap();
+        *revision = revision.wrapping_add(1);
+        self.wake.notify_all();
+    }
+
+    /// The revision predicate retains notifications sent before the wait begins.
+    pub fn wait_for_change(&self, revision: u64, timeout: Duration) {
+        let seen = self.wake_revision.lock().unwrap();
+        let _ = self.wake.wait_timeout_while(seen, timeout, |seen| *seen == revision && !self.stopped()).unwrap();
+    }
+
+    pub fn request_stop(&self) {
+        self.stop.store(true, Ordering::SeqCst);
+        self.notify_change();
     }
 
     pub fn stopped(&self) -> bool {
@@ -420,6 +447,37 @@ impl Shared {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notifications_before_wait_and_stop_are_not_lost() {
+        let shared = Shared::new(Config::default());
+        let revision = shared.wake_revision();
+        shared.request_locate();
+        assert_ne!(revision, shared.wake_revision());
+        // A long timeout makes a missing predicate fail the test immediately on timeout.
+        let start = std::time::Instant::now();
+        shared.wait_for_change(revision, Duration::from_secs(1));
+        assert!(start.elapsed() < Duration::from_millis(500));
+        assert!(shared.take_locate_request());
+        shared.request_stop();
+        shared.wait_for_change(shared.wake_revision(), Duration::from_secs(1));
+        assert!(shared.stopped());
+    }
+
+    #[test]
+    fn a_sleeping_watcher_wakes_for_a_locate_request() {
+        let shared = std::sync::Arc::new(Shared::new(Config::default()));
+        let revision = shared.wake_revision();
+        let watcher = shared.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            watcher.wait_for_change(revision, Duration::from_secs(2));
+            tx.send(watcher.take_locate_request()).unwrap();
+        });
+        shared.request_locate();
+        assert!(rx.recv_timeout(Duration::from_secs(1)).unwrap());
+        handle.join().unwrap();
+    }
 
     #[test]
     fn haptic_preview_requests() {

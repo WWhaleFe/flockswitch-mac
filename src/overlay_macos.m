@@ -537,11 +537,19 @@ static NSScreen *screen_at(NSPoint point) {
 static void end_edge(void) {
     gEdge.active = false;
     [gEdgePanel orderOut:nil];
+    [gEdgePanel close];
+    gEdgeView.painter = nil;
+    gEdgeView = nil;
+    gEdgePanel = nil;
 }
 
 static void end_locate(void) {
     gLocate.active = false;
     [gLocatePanel orderOut:nil];
+    [gLocatePanel close];
+    gLocateView.painter = nil;
+    gLocateView = nil;
+    gLocatePanel = nil;
 }
 
 static void tick(void) {

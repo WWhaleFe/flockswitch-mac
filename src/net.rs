@@ -130,6 +130,11 @@ fn double_click_interval() -> f64 {
     }
 }
 
+/// Where files received from another computer are saved.
+pub fn received_dir() -> Option<PathBuf> {
+    Some(dirs::download_dir()?.join("flockswitch"))
+}
+
 pub fn config_dir() -> PathBuf {
     Config::base_dir()
 }
@@ -233,11 +238,13 @@ pub fn network_side_ready(edge: Edge) -> bool {
     let Some(live) = live.as_ref() else { return false };
     let side = side_of(edge);
     let status = live.service.status();
+    // The computer in the neighbouring cell of the layout (a master's sub or, on a sub,
+    // another sub), as long as its link is up.
+    let next = flock_net::layout::neighbour(&status.layout, &status.me.id, side);
     status.running
+        && status.me.can_send
         && status.state.mode == "local"
-        && live.config.peers.iter().any(|p| {
-            p.side == Some(side) && status.peers.iter().any(|s| s.id == p.id && s.connected)
-        })
+        && next.is_some_and(|id| status.peers.iter().any(|s| s.id == id && s.connected))
 }
 
 /// Moves control to the computer on `edge`, entering at the spot matching (x, y).
@@ -292,6 +299,16 @@ fn apply_app_settings(config: &mut Config, app: &Value) {
     }
 }
 
+/// The name to show for the computer `id`: the live status (also for a sub known only
+/// through the master), else the configured peer name. None when neither has one.
+pub fn peer_name(net: &NetConfig, status: Option<&flock_net::Status>, id: &str) -> Option<String> {
+    status
+        .and_then(|s| s.peers.iter().find(|p| p.id == id))
+        .map(|p| p.name.clone())
+        .filter(|n| !n.is_empty())
+        .or_else(|| net.peers.iter().find(|p| p.id == id).map(|p| p.name.clone()).filter(|n| !n.is_empty()))
+}
+
 /// What this computer is doing on the network, for the header and the tray menu.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NetState {
@@ -311,7 +328,7 @@ impl NetState {
         };
         let name = || {
             let id = status.state.peer.as_deref().unwrap_or_default();
-            config.network.peers.iter().find(|p| p.id == id).map_or_else(|| id.to_string(), |p| p.name.clone())
+            peer_name(&config.network, Some(status), id).unwrap_or_else(|| id.to_string())
         };
         match status.state.mode.as_str() {
             "controlling" => NetState::Controlling(name()),
@@ -363,8 +380,10 @@ pub fn spawn(shared: Arc<Shared>) -> JoinHandle<()> {
             let mut prompted = false;
             let mut permission_poll = Instant::now() - Duration::from_secs(2);
             let mut was_ready = permissions_ready();
+            let mut rules_retry = Instant::now() - Duration::from_secs(1);
             let mut retry = Instant::now() - Duration::from_secs(5);
             while !shared.stopped() {
+                let revision = shared.wake_revision();
                 shared.reload_if_edited();
                 let version = shared.version();
                 let config = runtime_config(&shared);
@@ -373,6 +392,30 @@ pub fn spawn(shared: Arc<Shared>) -> JoinHandle<()> {
                 if request.exists() {
                     let _ = std::fs::remove_file(request);
                     request_permissions();
+                }
+                // Reading is non-destructive. Only a matching master snapshot acknowledges
+                // the latest edit, so sharing off, disconnects and restarts retain it.
+                if rules_retry.elapsed() >= Duration::from_secs(1) {
+                    rules_retry = Instant::now();
+                    crate::key_rules::drop_stale(&Config::path(), &shared.config());
+                    match crate::key_rules::pending(&Config::path(), &shared.config()) {
+                        Ok(Some(edit)) => {
+                            if let Some(s) = &service {
+                                let status = s.status();
+                                let master = shared.config().network.peers.iter().find(|p| p.role == Role::Master).map(|p| p.id.clone());
+                                let old_master = master.as_deref().is_some_and(|id| status.peers.iter().any(|x| x.id == id && x.connected && !x.keyrules));
+                                if old_master {
+                                    // A 2.0 master ignores key rule edits: stop resending.
+                                    crate::key_rules::clear(&Config::path());
+                                } else if status.following.is_some() {
+                                    // netcore holds edits back until the master's settings arrived.
+                                    if let Err(e) = s.send_key_rules(edit.keys) { log::warn!("send key rules: {e:#}"); }
+                                }
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(e) => log::warn!("read pending key rules: {e:#}"),
+                    }
                 }
                 if config.on && permission_poll.elapsed() >= Duration::from_secs(2) {
                     permission_poll = Instant::now();
@@ -403,6 +446,7 @@ pub fn spawn(shared: Arc<Shared>) -> JoinHandle<()> {
                         let unpaired = shared.clone();
                         let changed = shared.clone();
                         let master = shared.clone();
+                        let rules = shared.clone();
                         // No Logitech channels here: `switch_logitech` stays the no-op default.
                         let hooks = flock_net::Hooks {
                             switch_logitech: Box::new(|_| {}),
@@ -416,10 +460,14 @@ pub fn spawn(shared: Arc<Shared>) -> JoinHandle<()> {
                             }),
                             on_unpaired: Box::new(move |id| {
                                 if let Err(e) = unpaired
-                                    .update_config(|c| c.network.peers.retain(|p| p.id != id))
+                                    .update_config(|c| {
+                                        c.network.peers.retain(|p| p.id != id);
+                                        c.network.layout.retain(|cell| cell.id != id);
+                                    })
                                 {
                                     log::error!("save unpaired computer: {e:#}");
                                 }
+                                crate::key_rules::drop_stale(&Config::path(), &unpaired.config());
                             }),
                             on_peer_changed: Box::new(move |peer| {
                                 if let Err(e) = changed.update_config(|c| {
@@ -432,12 +480,16 @@ pub fn spawn(shared: Arc<Shared>) -> JoinHandle<()> {
                                 }
                             }),
                             on_master_settings: Box::new(move |settings| {
-                                if let Err(e) = master.update_config(|c| {
-                                    settings.apply_to(&mut c.network);
+                                if let Err(e) = master.try_update_config(|c| {
+                                    crate::key_rules::apply_master(&Config::path(), c, &settings)?;
                                     apply_app_settings(c, &settings.app);
+                                    Ok(())
                                 }) {
                                     log::error!("save master settings: {e:#}");
                                 }
+                            }),
+                            persist_key_rules: Box::new(move |keys| {
+                                rules.update_config(|c| c.network.keys = keys.clone())
                             }),
                             ..flock_net::Hooks::default()
                         };
@@ -457,6 +509,7 @@ pub fn spawn(shared: Arc<Shared>) -> JoinHandle<()> {
                                         name: config.name.clone(),
                                         port: config.port,
                                         error: Some(format!("{e:#}")),
+                                        can_send: true,
                                     },
                                     discovered: vec![],
                                     peers: vec![],
@@ -467,6 +520,9 @@ pub fn spawn(shared: Arc<Shared>) -> JoinHandle<()> {
                                     pairing: None,
                                     transfer: None,
                                     following: None,
+                                    layout: vec![],
+                                    reconnecting: false,
+                                    keys: Default::default(),
                                 };
                                 let _ = flock_net::write_status_with_permissions(config_dir(), &status, Some(permissions()));
                             }
@@ -480,14 +536,26 @@ pub fn spawn(shared: Arc<Shared>) -> JoinHandle<()> {
                         }
                     }
                 }
+                let running = service.is_some();
                 previous = Some(config);
+                if !running {
+                    shared.wait_for_change(revision, Duration::from_millis(250));
+                    continue;
+                }
                 for _ in 0..5 {
                     if shared.stopped() || shared.version() != version {
                         break;
                     }
                     thread::sleep(Duration::from_millis(50));
+                    // Woke from sleep or unlocked: look for the other computers again now.
+                    if crate::wake::take() {
+                        if let Some(s) = &service {
+                            log::info!("wake or unlock: reconnecting");
+                            let _ = s.reconnect();
+                        }
+                    }
                     if let Some(s) = &service {
-                        let now = s.status().state.mode;
+                        let now = s.state().mode;
                         // The cursor arrived here, or came back here.
                         let arrived = (mode == "local" && now == "controlled")
                             || (mode == "controlling" && now == "local");
@@ -542,27 +610,38 @@ fn modifier_changes(previous: u64, flags: u64, key: u16, held: &mut [bool; 8]) -
     }
     events
 }
-/// How long after Caps Lock turned on a "turned off" still belongs to the same press.
-const CAPS_SAME_PRESS: Duration = Duration::from_millis(400);
-/// Whether a Caps Lock state flip is a new press, to be sent as one tap.
-/// Plain Caps Lock flips once per press (on, then off at the next press). With macOS's
-/// "use Caps Lock to switch input source", a short press flips on and back off at once
-/// on release; that off belongs to the same press and must not count again, or the
-/// receiver would switch twice. The tap swallows the event, but the hardware state can
-/// still flip below the event tap; that cannot be prevented here.
-fn caps_press(on: bool, now: Instant, on_since: &mut Option<Instant>) -> bool {
-    if on {
-        *on_since = Some(now);
-        return true;
+/// Only raw HID edges define a press. Alpha-shift flips may be delayed until
+/// release by the input-source switcher and cannot tell two quick presses apart.
+#[derive(Default)]
+struct CapsPress { down: bool }
+impl CapsPress {
+    fn poll(&mut self, key_down: bool) -> Option<bool> {
+        if self.down == key_down { return None; }
+        self.down = key_down;
+        Some(key_down)
     }
-    let same = on_since.take().is_some_and(|t| now.duration_since(t) < CAPS_SAME_PRESS);
-    !same
+}
+extern "C" {
+    fn fs_caps_start(callback: unsafe extern "C" fn(Ref, bool, u64), context: Ref) -> Ref;
+    fn fs_caps_stop(handle: Ref);
+}
+struct CapsMonitor(Ref);
+impl Drop for CapsMonitor { fn drop(&mut self) { unsafe { fs_caps_stop(self.0); } } }
+unsafe extern "C" fn capture_caps(user: Ref, down: bool, age_ns: u64) {
+    let state = &mut *(user as *mut Capture);
+    if let Some(down) = state.caps.poll(down) {
+        let now = Instant::now();
+        let at = now.checked_sub(Duration::from_nanos(age_ns)).unwrap_or(now);
+        state.caps_times.lock().unwrap().push_back(at);
+        let _ = state.sink.send(InputEvent::Key { usage: 0x39, down });
+    }
 }
 struct Capture {
     sink: Sender<InputEvent>,
     flags: u64,
     held: [bool; 8],
-    caps_on_since: Option<Instant>,
+    caps: CapsPress,
+    caps_times: Arc<Mutex<std::collections::VecDeque<Instant>>>,
     tap: Ref,
 }
 unsafe extern "C" fn capture(_: Ref, kind: u32, event: Ref, user: Ref) -> Ref {
@@ -595,7 +674,7 @@ unsafe extern "C" fn capture(_: Ref, kind: u32, event: Ref, user: Ref) -> Ref {
             button,
             down: kind == 25,
         }),
-        10 | 11 => keymap::mac_to_hid(field(9) as u16).map(|usage| InputEvent::Key {
+        10 | 11 => keymap::mac_to_hid(field(9) as u16).filter(|&usage| usage != 0x39).map(|usage| InputEvent::Key {
             usage,
             down: kind == 10,
         }),
@@ -604,15 +683,7 @@ unsafe extern "C" fn capture(_: Ref, kind: u32, event: Ref, user: Ref) -> Ref {
             for ev in modifier_changes(state.flags, flags, field(9) as u16, &mut state.held) {
                 let _ = state.sink.send(ev);
             }
-            if (state.flags ^ flags) & (1 << 16) != 0 {
-                let on = flags & (1 << 16) != 0;
-                let press = caps_press(on, Instant::now(), &mut state.caps_on_since);
-                log::debug!("caps lock {} (press: {press})", if on { "on" } else { "off" });
-                if press {
-                    let _ = state.sink.send(InputEvent::Key { usage: 0x39, down: true });
-                    let _ = state.sink.send(InputEvent::Key { usage: 0x39, down: false });
-                }
-            }
+            // Caps Lock is sent by the raw HID observer, independently of these flips.
             state.flags = flags;
             None
         }
@@ -638,7 +709,6 @@ unsafe extern "C" fn capture(_: Ref, kind: u32, event: Ref, user: Ref) -> Ref {
 struct Injection {
     buttons: [bool; 5],
     modifiers: [bool; 8],
-    caps: bool,
     scroll: (f64, f64),
     clicks: [Option<(Instant, f64, f64, i64)>; 5],
     click_counts: [i64; 5],
@@ -652,6 +722,7 @@ struct MacPlatform {
     edges_allowed: AtomicBool,
     capture: Mutex<Option<CaptureThread>>,
     injection: Mutex<Injection>,
+    caps_times: Arc<Mutex<std::collections::VecDeque<Instant>>>,
 }
 impl Platform for MacPlatform {
     fn os(&self) -> Os {
@@ -700,7 +771,7 @@ impl Platform for MacPlatform {
         }
     }
     fn received_dir(&self) -> Option<PathBuf> {
-        Some(dirs::download_dir()?.join("flockswitch"))
+        received_dir()
     }
     fn permissions(&self) -> Option<flock_net::Permissions> { Some(permissions()) }
     fn ready(&self) -> Result<(), String> {
@@ -716,6 +787,8 @@ impl Platform for MacPlatform {
         self.stop_capture();
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = stop.clone();
+        let caps_times = self.caps_times.clone();
+        caps_times.lock().unwrap().clear();
         let (tx, rx) = mpsc::sync_channel(1);
         let handle = thread::Builder::new()
             .name("network-input-tap".into())
@@ -724,7 +797,8 @@ impl Platform for MacPlatform {
                     sink,
                     flags: CGEventSourceFlagsState(0),
                     held: [false; 8],
-                    caps_on_since: None,
+                    caps: CapsPress::default(),
+                    caps_times,
                     tap: null_mut(),
                 });
                 let mask = [1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 22, 25, 26, 27]
@@ -744,6 +818,16 @@ impl Platform for MacPlatform {
                     let _ = tx.send(false);
                     return;
                 }
+                let caps_handle = fs_caps_start(capture_caps, (&mut *state as *mut Capture).cast());
+                if caps_handle.is_null() {
+                    log::error!("cannot observe raw Caps Lock input");
+                    CFMachPortInvalidate(tap);
+                    CFRelease(source);
+                    CFRelease(tap);
+                    let _ = tx.send(false);
+                    return;
+                }
+                let caps_monitor = CapsMonitor(caps_handle);
                 CFRunLoopAddSource(CFRunLoopGetCurrent(), source, kCFRunLoopDefaultMode);
                 CGEventTapEnable(tap, true);
                 CGAssociateMouseAndMouseCursorPosition(0);
@@ -760,8 +844,10 @@ impl Platform for MacPlatform {
                 }
                 let _ = tx.send(true);
                 while !stopping.load(Ordering::Acquire) {
-                    CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, false);
+                    CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.01, false);
                 }
+                drop(caps_monitor);
+                capture_caps((&mut *state as *mut Capture).cast(), false, 0);
                 CGEventTapEnable(tap, false);
                 CFMachPortInvalidate(tap);
                 CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, kCFRunLoopDefaultMode);
@@ -778,6 +864,11 @@ impl Platform for MacPlatform {
             relaunch_after_tap_failure();
             anyhow::bail!("Cannot create input event tap")
         }
+    }
+    fn captured_at(&self, event: &InputEvent) -> Option<Instant> {
+        if matches!(event, InputEvent::Key { usage: 0x39, .. }) {
+            self.caps_times.lock().unwrap().pop_front()
+        } else { None }
     }
     fn stop_capture(&self) {
         if let Some(capture) = self.capture.lock().unwrap().take() {
@@ -851,9 +942,6 @@ impl Platform for MacPlatform {
                     if (0xe0..=0xe7).contains(&usage) {
                         s.modifiers[(usage - 0xe0) as usize] = down;
                     }
-                    if usage == 0x39 && down {
-                        s.caps = !s.caps;
-                    }
                     CGEventCreateKeyboardEvent(null_mut(), key, down)
                 }
             }
@@ -865,10 +953,7 @@ impl Platform for MacPlatform {
                     .iter()
                     .zip(MODIFIERS)
                     .filter(|(held, _)| **held)
-                    .fold(
-                        if s.caps { 1 << 16 } else { 0 },
-                        |f, (_, (_, bit, group))| f | bit | group,
-                    );
+                    .fold(0, |f, (_, (_, bit, group))| f | bit | group);
                 CGEventSetFlags(event, flags);
                 CGEventPost(0, event);
                 CFRelease(event);
@@ -975,17 +1060,53 @@ mod tests {
         );
     }
     #[test]
+    fn caps_physical_down_starts_before_the_input_source_release_flip() {
+        let mut caps = CapsPress::default();
+        assert_eq!(caps.poll(true), Some(true));
+        // Holding the physical key must keep it down even before flagsChanged arrives.
+        assert_eq!(caps.poll(true), None);
+        assert_eq!(caps.poll(false), Some(false));
+    }
+
+    #[test]
+    fn caps_two_rapid_physical_presses_are_both_forwarded() {
+        let mut caps = CapsPress::default();
+        for _ in 0..2 {
+            assert_eq!(caps.poll(true), Some(true));
+            assert_eq!(caps.poll(false), Some(false));
+        }
+    }
+
+    #[test]
+    fn raw_caps_timestamps_preserve_a_long_hold_when_delivery_is_batched() {
+        let platform = MacPlatform::default();
+        let (sink, input) = mpsc::channel();
+        let mut capture = Capture { sink, flags: 0, held: [false; 8], caps: CapsPress::default(),
+            caps_times: platform.caps_times.clone(), tap: null_mut() };
+        let user = (&mut capture as *mut Capture).cast();
+        unsafe {
+            capture_caps(user, true, 700_000_000);
+            capture_caps(user, false, 0);
+        }
+        let down = input.try_recv().unwrap();
+        let up = input.try_recv().unwrap();
+        assert_eq!(down, InputEvent::Key { usage: 0x39, down: true });
+        assert_eq!(up, InputEvent::Key { usage: 0x39, down: false });
+        let start = platform.captured_at(&down).unwrap();
+        let end = platform.captured_at(&up).unwrap();
+        assert!(end.duration_since(start) >= Duration::from_millis(700));
+        assert!(platform.caps_times.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn caps_is_a_toggle_and_scroll_keeps_fractions() {
         assert!(modifier_changes(0, 1 << 16, 0x39, &mut [false; 8]).is_empty());
-        let t = Instant::now();
-        let mut since = None;
-        // Plain Caps Lock: on at one press, off at the next.
-        assert!(caps_press(true, t, &mut since));
-        assert!(caps_press(false, t + Duration::from_secs(2), &mut since));
-        // Input-source switching: on and straight back off within one short press.
-        assert!(caps_press(true, t + Duration::from_secs(3), &mut since));
-        assert!(!caps_press(false, t + Duration::from_millis(3150), &mut since));
-        assert!(caps_press(true, t + Duration::from_secs(5), &mut since));
+        let mut caps = CapsPress::default();
+        assert_eq!(caps.poll(false), None);
+        assert_eq!(caps.poll(true), Some(true));
+        for _ in 0..70 { assert_eq!(caps.poll(true), None); }
+        assert_eq!(caps.poll(false), Some(false));
+        assert_eq!(caps.poll(false), None);
         let mut remainder = 0.0;
         assert_eq!(scroll_pixels(&mut remainder, 0.04), 0);
         assert_eq!(scroll_pixels(&mut remainder, 0.08), 1);
@@ -1054,13 +1175,16 @@ mod tests {
         config.network.peers.push(flock_net::PeerConfig { id: "p1".into(), name: "Laptop".into(), ..Default::default() });
         let status = |mode: &str, peer: Option<&str>| flock_net::Status {
             running: true,
-            me: flock_net::MeStatus { id: String::new(), name: String::new(), port: 0, error: None },
+            me: flock_net::MeStatus { id: String::new(), name: String::new(), port: 0, error: None, can_send: true },
             discovered: vec![],
             peers: vec![],
             state: flock_net::StateStatus { mode: mode.into(), peer: peer.map(Into::into) },
             pairing: None,
             transfer: None,
             following: None,
+            layout: vec![],
+            reconnecting: false,
+            keys: Default::default(),
         };
         assert_eq!(NetState::of(&config, None), NetState::Off);
         assert_eq!(NetState::of(&config, Some(&status("local", None))), NetState::Idle);
@@ -1068,6 +1192,26 @@ mod tests {
         assert_eq!(NetState::of(&config, Some(&status("controlled", Some("p1")))), NetState::Controlled("Laptop".into()));
         config.network.on = false;
         assert_eq!(NetState::of(&config, Some(&status("local", None))), NetState::Off);
+    }
+    #[test]
+    fn peer_names_prefer_the_live_status() {
+        let mut config = Config::default();
+        config.network.on = true;
+        config.network.notice_accepted = true;
+        config.network.peers.push(flock_net::PeerConfig { id: "p1".into(), name: "Laptop".into(), ..Default::default() });
+        let peer = |id: &str, name: &str| flock_net::PeerStatus { id: id.into(), name: name.into(), os: None, connected: true, rtt_ms: None, can_send: true, via_master: true, keyrules: true };
+        let status = flock_net::Status {
+            running: true,
+            me: flock_net::MeStatus { id: String::new(), name: String::new(), port: 0, error: None, can_send: true },
+            discovered: vec![],
+            peers: vec![peer("p1", "Renamed"), peer("p2", "Desk"), peer("p3", "")],
+            state: flock_net::StateStatus { mode: "controlling".into(), peer: Some("p2".into()) },
+            pairing: None, transfer: None, following: None, layout: vec![], reconnecting: false, keys: Default::default(),
+        };
+        assert_eq!(NetState::of(&config, Some(&status)), NetState::Controlling("Desk".into()));
+        assert_eq!(peer_name(&config.network, Some(&status), "p1").as_deref(), Some("Renamed"));
+        assert_eq!(peer_name(&config.network, Some(&status), "p3"), None);
+        assert_eq!(peer_name(&config.network, None, "p1").as_deref(), Some("Laptop"));
     }
 }
 
