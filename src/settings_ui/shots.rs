@@ -153,6 +153,7 @@ pub(super) fn demo_status(cfg: &Config) -> flock_net::Status {
         layout: cfg.network.layout.clone(),
         reconnecting: false,
         keys: cfg.network.all_rules(),
+        key_check: None,
     }
 }
 

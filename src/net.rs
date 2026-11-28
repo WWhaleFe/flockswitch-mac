@@ -53,6 +53,7 @@ extern "C" {
         z: i32,
     ) -> Ref;
     fn CGEventPost(tap: u32, event: Ref);
+    fn CGEventKeyboardSetUnicodeString(event: Ref, length: usize, string: *const u16);
     fn CGAssociateMouseAndMouseCursorPosition(connected: u32) -> i32;
     fn CGDisplayHideCursor(display: u32) -> i32;
     fn CGDisplayShowCursor(display: u32) -> i32;
@@ -506,6 +507,11 @@ pub fn spawn(shared: Arc<Shared>) -> JoinHandle<()> {
                             persist_key_rules: Box::new(move |keys| {
                                 rules.update_config(|c| c.network.keys = keys.clone())
                             }),
+                            open_key_check: Box::new(|| {
+                                if let Err(e) = crate::update::spawn_self(&["keycheck"], false) {
+                                    log::warn!("cannot open the key check window: {e}");
+                                }
+                            }),
                             ..flock_net::Hooks::default()
                         };
                         match Service::start(config.clone(), platform.clone(), hooks) {
@@ -539,6 +545,7 @@ pub fn spawn(shared: Arc<Shared>) -> JoinHandle<()> {
                                     layout: vec![],
                                     reconnecting: false,
                                     keys: Default::default(),
+                                    key_check: None,
                                 };
                                 let _ = flock_net::write_status_with_permissions(config_dir(), &status, Some(permissions()));
                             }
@@ -649,6 +656,8 @@ extern "C" {
     fn fs_caps_start(callback: unsafe extern "C" fn(Ref, bool, u64), context: Ref) -> Ref;
     fn fs_caps_stop(handle: Ref);
     fn fs_input_source_toggle();
+    fn fs_key_layout_watch();
+    fn fs_key_chars(keycode: u16, flags: u64, out: *mut u16, max: i32) -> i32;
 }
 struct CapsMonitor(Ref);
 impl Drop for CapsMonitor { fn drop(&mut self) { unsafe { fs_caps_stop(self.0); } } }
@@ -911,7 +920,14 @@ impl Platform for MacPlatform {
         }
     }
     fn inject(&self, ev: &InputEvent) {
+        static LAYOUT: std::sync::Once = std::sync::Once::new();
+        LAYOUT.call_once(|| unsafe { fs_key_layout_watch() });
         let mut s = self.injection.lock().unwrap();
+        // A letter, digit or sign key: its characters are set for the modifiers held.
+        let typed = match *ev {
+            InputEvent::Key { usage, .. } if !(0xe0..=0xe7).contains(&usage) => keymap::hid_to_mac(usage),
+            _ => None,
+        };
         // Input injection continues even while Logitech owns the screen edges.
         let (x, y) = crate::edge::platform::cursor().unwrap_or((0.0, 0.0));
         let event = unsafe {
@@ -998,6 +1014,13 @@ impl Platform for MacPlatform {
                     .filter(|(held, _)| **held)
                     .fold(0, |f, (_, (_, bit, group))| f | bit | group);
                 CGEventSetFlags(event, flags);
+                if let Some(key) = typed {
+                    let mut chars = [0u16; 8];
+                    let n = fs_key_chars(key, flags, chars.as_mut_ptr(), chars.len() as i32);
+                    if n > 0 {
+                        CGEventKeyboardSetUnicodeString(event, n as usize, chars.as_ptr());
+                    }
+                }
                 CGEventPost(0, event);
                 CFRelease(event);
             }
@@ -1244,7 +1267,7 @@ mod tests {
             following: None,
             layout: vec![],
             reconnecting: false,
-            keys: Default::default(),
+            keys: Default::default(), key_check: None,
         };
         assert_eq!(NetState::of(&config, None), NetState::Off);
         assert_eq!(NetState::of(&config, Some(&status("local", None))), NetState::Idle);
@@ -1266,7 +1289,7 @@ mod tests {
             discovered: vec![],
             peers: vec![peer("p1", "Renamed"), peer("p2", "Desk"), peer("p3", "")],
             state: flock_net::StateStatus { mode: "controlling".into(), peer: Some("p2".into()) },
-            pairing: None, transfer: None, following: None, layout: vec![], reconnecting: false, keys: Default::default(),
+            pairing: None, transfer: None, following: None, layout: vec![], reconnecting: false, keys: Default::default(), key_check: None,
         };
         assert_eq!(NetState::of(&config, Some(&status)), NetState::Controlling("Desk".into()));
         assert_eq!(peer_name(&config.network, Some(&status), "p1").as_deref(), Some("Renamed"));
