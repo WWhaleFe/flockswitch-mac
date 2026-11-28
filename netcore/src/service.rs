@@ -22,6 +22,7 @@ use std::{
 
 mod files;
 mod queue;
+mod keycheck;
 
 const IDLE_POLL: Duration = Duration::from_millis(100);
 const OFF_POLL: Duration = Duration::from_millis(250);
@@ -51,6 +52,8 @@ const MAX_DISPLAYS: usize = 16;
 const DISPLAYS_POLL: Duration = Duration::from_secs(2);
 /// A computer that stayed unlinked this long is also dialled by the side with the larger
 /// id (normally only the smaller one dials), in case the smaller one cannot reach it.
+/// A key check that sees no key this long lets the keyboard go.
+const PROBE_IDLE: Duration = Duration::from_secs(30);
 const FALLBACK_DIAL: Duration = Duration::from_secs(6);
 /// How long a peer that closed the link with Bye "paused" is left alone (unless it dials us
 /// or shows up with other addresses).
@@ -126,6 +129,7 @@ impl Service {
             layout: vec![],
             reconnecting: false,
             keys: config.all_rules(),
+            key_check: None,
         }));
         let (tx, rx) = mpsc::channel();
         let (events, event_rx) = mpsc::channel();
@@ -178,6 +182,8 @@ impl Service {
             buttons: HashSet::new(),
             captured_keys: HashSet::new(),
             mapper: KeyMapper::default(),
+            key_check: None,
+            probe: None,
             discovery: None,
             discovered: vec![],
             edge_wait: None,
@@ -604,6 +610,10 @@ struct Control {
     buttons: HashSet<MouseButton>,
     captured_keys: HashSet<u16>,
     mapper: KeyMapper,
+    /// On a master: the key check window is open, with its log.
+    key_check: Option<keycheck::KeyCheck>,
+    /// This computer's keyboard is held for a key check: since its last key.
+    probe: Option<Instant>,
     discovery: Option<Discovery>,
     discovered: Vec<DiscoveredPeer>,
     edge_wait: Option<(Side, Instant)>,
@@ -772,6 +782,11 @@ impl Control {
                 Ok(Some(r)) => self.request(r),
                 Ok(None) => {}
                 Err(e) => log::warn!("network request: {e:#}"),
+            }
+            if let Some(at) = self.probe {
+                if !matches!(self.state, State::Local) || at.elapsed() >= PROBE_IDLE {
+                    self.stop_probe();
+                }
             }
             if self.config.on {
                 self.maintenance();
@@ -1044,11 +1059,25 @@ impl Control {
                 self.prune_peer_state();
                 (self.hooks.on_unpaired)(unpair);
             }
-            Request::Action { action } => {
-                if action == "reconnect" {
-                    self.reconnect(None);
+            Request::Action { action } => match action.as_str() {
+                "reconnect" => self.reconnect(None),
+                // The keys tab's "check key mapping": a master opens its window; a sub asks
+                // its master to and holds its own keyboard for the check.
+                "keycheck_open" => {
+                    if self.config.role == Role::Master {
+                        self.open_key_check();
+                    } else if let Some(m) = self.master_link_with("keycheck") {
+                        if let Some(l) = self.links.get(&m) {
+                            l.send(Msg::KeyCheckOpen);
+                        }
+                        self.start_probe();
+                    }
                 }
-            }
+                "keycheck_probe" => self.start_probe(),
+                "keycheck_stop" => self.stop_probe(),
+                "keycheck_close" => self.close_key_check(),
+                _ => {}
+            },
         }
     }
     /// Pause or resume the connection to a paired computer. A paused one is disconnected
@@ -1442,6 +1471,21 @@ impl Control {
                                 }
                             }
                             self.local(false);
+                        }
+                    }
+                    Msg::KeyCheckOpen => {
+                        if self.config.role == Role::Master && self.is_direct_peer(&id) {
+                            self.open_key_check();
+                        }
+                    }
+                    Msg::KeyProbe { usage, down } => {
+                        if self.config.role == Role::Master && self.is_direct_peer(&id) {
+                            self.check_key(&id, usage, down, None);
+                        }
+                    }
+                    Msg::KeyCheckEnd => {
+                        if from_master {
+                            self.stop_probe();
                         }
                     }
                     Msg::Pass { to, side, pos, whole, display } => {
@@ -2224,12 +2268,20 @@ impl Control {
             None
         };
         self.enforce_send_permission();
+        if self.probe.is_some() {
+            self.probe_event(event);
+            return;
+        }
         let State::Controlling { peer, .. } = &self.state else {
             return;
         };
         let peer = peer.clone();
         if !event.valid() {
             return;
+        }
+        if let (Some(_), InputEvent::Key { usage, down }) = (&self.key_check, &event) {
+            let (usage, down, me) = (*usage, *down, self.identity.id.clone());
+            self.check_key(&me, usage, down, Some(&peer));
         }
         if let InputEvent::Key { usage, down } = &mut event {
             if *down {
@@ -2259,6 +2311,115 @@ impl Control {
         }
     }
 
+    /// A paired computer of this one's own (not one known only through the master).
+    fn is_direct_peer(&self, id: &str) -> bool {
+        self.config.peers.iter().any(|p| p.id == id && !p.via_master)
+    }
+    /// On a sub: the linked master, when it understands `feature`.
+    fn master_link_with(&self, feature: &str) -> Option<String> {
+        let m = self.config.peers.iter().find(|p| p.role == Role::Master && !p.via_master)?;
+        let l = self.links.get(&m.id).filter(|l| l.paired)?;
+        l.features.iter().any(|f| f == feature).then(|| m.id.clone())
+    }
+    fn open_key_check(&mut self) {
+        if self.key_check.is_none() {
+            self.key_check = Some(keycheck::KeyCheck::default());
+        }
+        (self.hooks.open_key_check)();
+        self.publish(true);
+    }
+    /// The key check window was closed: the subs stop sending keys, this computer lets go.
+    fn close_key_check(&mut self) {
+        if self.key_check.take().is_none() {
+            return;
+        }
+        for l in self.links.values().filter(|l| l.paired && l.features.iter().any(|f| f == "keycheck")) {
+            l.send(Msg::KeyCheckEnd);
+        }
+        self.stop_probe();
+        self.publish(true);
+    }
+    /// Holds this computer's keyboard (and pointer) for a key check: only while it is on
+    /// its own, never across a crossing. Escape, `PROBE_IDLE` without a key, or the window
+    /// closing ends it.
+    fn start_probe(&mut self) {
+        if self.probe.is_some() || !matches!(self.state, State::Local) || self.platform.ready().is_err() {
+            return;
+        }
+        if self.edge_hit.take().is_some() {
+            self.platform.stop_capture();
+        }
+        self.edge_wait = None;
+        while self.captured.try_recv().is_ok() {}
+        if let Err(e) = self.platform.start_capture(self.capture.clone()) {
+            log::warn!("key check: cannot hold the keyboard: {e}");
+            self.platform.stop_capture();
+            return;
+        }
+        log::info!("key check: this keyboard is held until Escape");
+        self.probe = Some(Instant::now());
+        self.captured_keys.clear();
+        self.publish(true);
+    }
+    fn stop_probe(&mut self) {
+        if self.probe.take().is_none() {
+            return;
+        }
+        self.platform.stop_capture();
+        // Keys still down are let go in the log too, so the next check starts clean.
+        let held: Vec<u16> = self.captured_keys.drain().collect();
+        for usage in held {
+            self.send_probe(usage, false);
+        }
+        self.publish(true);
+    }
+    /// A captured event while this keyboard is held for a key check.
+    fn probe_event(&mut self, event: InputEvent) {
+        let InputEvent::Key { usage, down } = event else { return };
+        self.probe = Some(Instant::now());
+        if usage == 0x29 {
+            if down {
+                self.stop_probe();
+            }
+            return;
+        }
+        if down {
+            self.captured_keys.insert(usage);
+        } else if !self.captured_keys.remove(&usage) {
+            return;
+        }
+        self.send_probe(usage, down);
+    }
+    fn send_probe(&mut self, usage: u16, down: bool) {
+        if self.config.role == Role::Master {
+            let me = self.identity.id.clone();
+            self.check_key(&me, usage, down, None);
+        } else if let Some(m) = self.master_link_with("keycheck") {
+            if let Some(l) = self.links.get(&m) {
+                l.send(Msg::KeyProbe { usage, down });
+            }
+        }
+    }
+    /// On a master with the window open: logs a key edge from computer `from` (this one or
+    /// a sub) as each other computer of the group gets it.
+    fn check_key(&mut self, from: &str, usage: u16, down: bool, live: Option<&str>) {
+        let Some(check) = &mut self.key_check else { return };
+        let mut group = vec![keycheck::Computer {
+            id: self.identity.id.clone(),
+            name: computer_name(&self.config),
+            os: self.platform.os(),
+        }];
+        group.extend(self.config.peers.iter().filter(|p| !p.via_master).map(|p| keycheck::Computer {
+            id: p.id.clone(),
+            name: p.name.clone(),
+            os: p.os,
+        }));
+        let Some(source) = group.iter().find(|c| c.id == from).cloned() else { return };
+        let config = &self.config;
+        if check.record(&source, usage, down, &group, live, |s, d| config.rules_for(s, d), Instant::now()) {
+            self.publish(true);
+        }
+    }
     fn switch_channel(&self, id: &str) {
         if let Some(p) = self.config.peers.iter().find(|p| p.id == id) {
             if (1..=3).contains(&p.logitech_channel) {
@@ -2349,6 +2510,10 @@ impl Control {
         self.cross_to(peer, side, Exit { display, target, pos: along, whole: pos });
     }
     fn poll_cursor(&mut self) {
+        // The keyboard is held for a key check: no crossing until it ends.
+        if self.probe.is_some() {
+            return;
+        }
         if !matches!(self.state, State::Local) && self.platform.ready().is_err() {
             self.local(true);
         }
@@ -2958,6 +3123,11 @@ impl Control {
             .collect();
         status.layout = self.my_cells();
         status.keys = self.config.all_rules();
+        status.key_check = (self.key_check.is_some() || self.probe.is_some()).then(|| KeyCheckStatus {
+            open: self.key_check.is_some(),
+            probing: self.probe.is_some(),
+            entries: self.key_check.as_ref().map(|k| k.entries.iter().cloned().collect()).unwrap_or_default(),
+        });
         if let Some(since) = self.reconnecting {
             let down = self.config.peers.iter().any(|p| !self.open(&p.id));
             if since.elapsed() >= RECONNECT_SHOWN || (!down && since.elapsed() >= Duration::from_millis(500)) {
@@ -3561,6 +3731,7 @@ mod tests {
             layout: vec![],
             reconnecting: false,
             keys: config.all_rules(),
+            key_check: None,
         }));
         let (wake, rx) = mpsc::channel();
         let (events, event_rx) = mpsc::channel();
@@ -3612,6 +3783,8 @@ mod tests {
             buttons: HashSet::new(),
             captured_keys: HashSet::new(),
             mapper: KeyMapper::default(),
+            key_check: None,
+            probe: None,
             discovery: None,
             discovered: vec![],
             edge_wait: None,
@@ -5358,6 +5531,62 @@ mod tests {
         *r.p.cursor_at.lock().unwrap() = Some((500.0, 999.0));
         r.c.poll_cursor();
         assert!(matches!(r.c.state, State::Controlled { .. }));
+    }
+
+    #[test]
+    fn a_sub_asks_for_the_key_check_and_its_keys_show_on_the_master_as_each_computer_gets_them() {
+        // The sub: the button asks the master and holds its own keyboard; Escape lets go.
+        let mut s = rig(Role::Sub);
+        s.c.config.peers.push(peer(MASTER, Role::Master));
+        let to_master = link_features(&mut s.c, MASTER, Role::Master, &["group", "keyrules", "keycheck"]);
+        s.c.request(Request::Action { action: "keycheck_open".into() });
+        assert_eq!(sent(&to_master), vec![Msg::KeyCheckOpen]);
+        assert!(s.c.probe.is_some());
+        s.c.poll_cursor();
+        assert!(s.c.probe.is_some(), "no crossing while held");
+        s.c.capture_event(InputEvent::Key { usage: 0xe3, down: true });
+        s.c.capture_event(InputEvent::Motion { dx: 5.0, dy: 0.0 });
+        assert_eq!(sent(&to_master), vec![Msg::KeyProbe { usage: 0xe3, down: true }], "keys only");
+        s.c.capture_event(InputEvent::Key { usage: 0x29, down: true });
+        assert!(s.c.probe.is_none());
+        assert_eq!(sent(&to_master), vec![Msg::KeyProbe { usage: 0xe3, down: false }], "a held key is let go, Escape is not sent");
+        // The window closing on the master ends a check still going on.
+        s.c.request(Request::Action { action: "keycheck_probe".into() });
+        assert!(s.c.probe.is_some());
+        message(&mut s.c, MASTER, Msg::KeyCheckEnd);
+        assert!(s.c.probe.is_none());
+
+        // The master: a Mac sub's Command shows as Ctrl here (Windows) and on a Linux sub.
+        let mut m = rig(Role::Master);
+        m.c.config.name = "Win".into();
+        let opened = Arc::new(AtomicUsize::new(0));
+        let count = opened.clone();
+        m.c.hooks.open_key_check = Box::new(move || { count.fetch_add(1, Ordering::Relaxed); });
+        let mut mac = peer(SUB, Role::Sub);
+        mac.os = Os::Mac;
+        mac.name = "Mac".into();
+        let mut linux = peer(OTHER, Role::Sub);
+        linux.os = Os::Linux;
+        linux.name = "Linux".into();
+        m.c.config.peers.extend([mac, linux]);
+        let to_sub = link_features(&mut m.c, SUB, Role::Sub, &["group", "keyrules", "keycheck"]);
+        message(&mut m.c, SUB, Msg::KeyProbe { usage: 0xe3, down: true });
+        assert!(m.c.key_check.is_none(), "nothing is logged without the window");
+        message(&mut m.c, SUB, Msg::KeyCheckOpen);
+        assert_eq!(opened.load(Ordering::Relaxed), 1);
+        message(&mut m.c, SUB, Msg::KeyProbe { usage: 0xe3, down: true });
+        let entries = m.c.status.lock().unwrap().key_check.clone().unwrap().entries;
+        let e = entries.last().unwrap();
+        assert_eq!((e.from.as_str(), e.key.as_str()), ("Mac", "Command"));
+        let got = |name: &str| e.to.iter().find(|t| t.name == name).map(|t| t.keys.clone());
+        assert_eq!(got("Linux").as_deref(), Some("Ctrl"));
+        assert_eq!(got("Win").as_deref(), Some("Ctrl"), "the master itself");
+        assert_eq!(got("Mac"), None, "not the pressing computer");
+        // Closing the window tells the subs.
+        m.c.request(Request::Action { action: "keycheck_close".into() });
+        assert!(m.c.key_check.is_none());
+        assert!(sent(&to_sub).contains(&Msg::KeyCheckEnd));
+        assert!(m.c.status.lock().unwrap().key_check.is_none());
     }
 
     #[test]

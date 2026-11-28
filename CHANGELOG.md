@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.5.0 - 2026-11-28
+
+- Keyboard: a **Check key mapping** button on the Keyboard page. Pressed on any computer, it opens the **Key mapping check** window on the master, which shows what each other computer gets for the keys you press, in that computer's own names (Windows Ctrl+C is Command+C on a Mac, Mac Command is Ctrl on Linux). The master's keys show as they go to the computer the pointer is on (marked as receiving now), or test them with **Test this computer's keyboard** in the window. On a sub the button tests that sub's keyboard, showing what the master and the other subs get for its keys. While a keyboard is tested its keys and pointer do nothing on that computer; Esc, 30 seconds without a key or closing the window ends it. The master and the sub both need this version.
+- Fix: typing Korean on this Mac from another computer's keyboard, letters that need Shift (ㄲ ㄸ ㅃ ㅆ ㅉ ㅒ ㅖ) were not typed. The key arrived with Shift held but carried the unshifted character, which the Korean input method uses, so it typed ㅂ instead of ㅃ. The key now carries the character the current layout gives with its modifiers, as a real keyboard's does.
+
 ## 2.4.0 - 2026-11-27
 
 - Crossing: on a controlled screen, any edge that touches another computer on the layout now leads there, not only the edge the cursor came in by. A computer wrapped around by the master's monitors (an L) that was entered from the top goes back over its left edge, say, to the monitor that is there. From a sub controlled with the master's mouse, the cursor goes straight on to the sub next to it (the master passes the input on). Both computers need this version; with an older one the cursor goes back only over the edge it came in by, as before.
